@@ -14,6 +14,11 @@ Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
 Pd=input(defval = 10, title = "ATR Period", minval=1)
 minrateu = input(defval = 1.0, title="Min profit Rate if Center Line Used", minval = 0)
 usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%")
+
+// === TAKE PROFIT OPTIONS ===
+useRRTP = input(defval = false, title="Use RR-Based Take Profit")
+rrRatio = input(defval = 1.5, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
+showTPLine = input(defval = true, title="Show TP Level Line")
 showpivot = input(defval = false, title="Show Pivot Points")
 showcl = input(defval = false, title="Show PP Center Line")
 onlylong = input(defval = false, title="Enter Only Long Position")
@@ -102,6 +107,50 @@ Trailingsl = Trend == 1 ? TUp : TDown
 linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
 plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
 
+// === RR-BASED TP TRACKING ===
+// Track entry SL level and calculate TP
+var float entrySL = na
+var float tpLevel = na
+var int posDirection = 0  // 1 = long, -1 = short, 0 = flat
+
+// Detect new position entry (only track if RR TP is enabled)
+newLongEntry = useRRTP and strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_size[1] >= 0
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// Capture SL and calculate TP on new entry
+if newLongEntry
+    entrySL := Trailingsl  // SL is the current trailing stop
+    risk = strategy.position_avg_price - entrySL
+    tpLevel := strategy.position_avg_price + (risk * rrRatio)
+    posDirection := 1
+
+if newShortEntry
+    entrySL := Trailingsl  // SL is the current trailing stop
+    risk = entrySL - strategy.position_avg_price
+    tpLevel := strategy.position_avg_price - (risk * rrRatio)
+    posDirection := -1
+
+if positionClosed
+    entrySL := na
+    tpLevel := na
+    posDirection := 0
+
+// Plot TP level and Entry SL for debugging
+plot(useRRTP and showTPLine and not na(tpLevel) ? tpLevel : na,
+     color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr, title="TP Level")
+plot(useRRTP and showTPLine and not na(entrySL) ? entrySL : na,
+     color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr, title="Entry SL Level")
+
+// Debug label on entry
+showDebugLabels = input(defval = false, title="Show TP Debug Labels")
+if newLongEntry and showDebugLabels
+    label.new(bar_index, high, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+              color=color.green, textcolor=color.white, size=size.small)
+if newShortEntry and showDebugLabels
+    label.new(bar_index, low, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+              color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
+
 plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
 
 bsignal = Trend == 1 and Trend[1] == -1
@@ -109,11 +158,30 @@ ssignal = Trend == -1 and Trend[1] == 1
 
 halfexited = false
 halfexited := nz(halfexited[1], false)
-if change(Trend)
+
+// Track if TP was hit this bar (to avoid close_all overriding TP exit)
+var bool tpHitThisBar = false
+tpHitThisBar := false
+
+// RR-based Take Profit exits (check BEFORE trend reversal close)
+if useRRTP and not na(tpLevel)
+    // Long TP hit
+    if posDirection == 1 and high >= tpLevel
+        strategy.close("Buy", comment = "TP Hit")
+        tpLevel := na
+        entrySL := na
+        tpHitThisBar := true
+    // Short TP hit
+    if posDirection == -1 and low <= tpLevel
+        strategy.close("Sell", comment = "TP Hit")
+        tpLevel := na
+        entrySL := na
+        tpHitThisBar := true
+
+// Close on trend reversal (only if TP wasn't hit)
+if change(Trend) and not tpHitThisBar
     strategy.close_all()
 
-
-    
 if bsignal and canTrade
     strategy.entry("Buy", true, comment = "Buy")
 if ssignal and not onlylong and canTrade
