@@ -111,30 +111,30 @@ plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
 // Track entry SL level and calculate TP
 var float entrySL = na
 var float tpLevel = na
+var float entryPrice = na
 var int posDirection = 0  // 1 = long, -1 = short, 0 = flat
 
 // Detect new position entry (only track if RR TP is enabled)
 newLongEntry = useRRTP and strategy.position_size > 0 and strategy.position_size[1] <= 0
 newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_size[1] >= 0
-positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 
-// Capture SL and calculate TP on new entry
+// Current ATR value for risk calculation
+currentATR = atr(Pd)
+atrRisk = Factor * currentATR
+
 if newLongEntry
-    entrySL := Trailingsl  // SL is the current trailing stop
-    risk = strategy.position_avg_price - entrySL
-    tpLevel := strategy.position_avg_price + (risk * rrRatio)
+    // For LONG: SL is below entry, TP is above entry
+    entryPrice := strategy.position_avg_price
+    entrySL := entryPrice - atrRisk
+    tpLevel := entryPrice + (atrRisk * rrRatio)
     posDirection := 1
 
 if newShortEntry
-    entrySL := Trailingsl  // SL is the current trailing stop
-    risk = entrySL - strategy.position_avg_price
-    tpLevel := strategy.position_avg_price - (risk * rrRatio)
+    // For SHORT: SL is above entry, TP is below entry
+    entryPrice := strategy.position_avg_price
+    entrySL := entryPrice + atrRisk
+    tpLevel := entryPrice - (atrRisk * rrRatio)
     posDirection := -1
-
-if positionClosed
-    entrySL := na
-    tpLevel := na
-    posDirection := 0
 
 // Plot TP level and Entry SL for debugging
 plot(useRRTP and showTPLine and not na(tpLevel) ? tpLevel : na,
@@ -145,10 +145,20 @@ plot(useRRTP and showTPLine and not na(entrySL) ? entrySL : na,
 // Debug label on entry
 showDebugLabels = input(defval = false, title="Show TP Debug Labels")
 if newLongEntry and showDebugLabels
-    label.new(bar_index, high, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+    label.new(bar_index, high,
+              "LONG\nEntry:" + tostring(entryPrice, "#.#####") +
+              "\nTP:" + tostring(tpLevel, "#.#####") +
+              "\nSL:" + tostring(entrySL, "#.#####") +
+              "\nATR:" + tostring(currentATR, "#.#####") +
+              "\nRisk:" + tostring(atrRisk, "#.#####"),
               color=color.green, textcolor=color.white, size=size.small)
 if newShortEntry and showDebugLabels
-    label.new(bar_index, low, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+    label.new(bar_index, low,
+              "SHORT\nEntry:" + tostring(entryPrice, "#.#####") +
+              "\nTP:" + tostring(tpLevel, "#.#####") +
+              "\nSL:" + tostring(entrySL, "#.#####") +
+              "\nATR:" + tostring(currentATR, "#.#####") +
+              "\nRisk:" + tostring(atrRisk, "#.#####"),
               color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
 
 plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
@@ -156,36 +166,57 @@ plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.re
 bsignal = Trend == 1 and Trend[1] == -1
 ssignal = Trend == -1 and Trend[1] == 1
 
+// === SIGNAL VISUALIZATION ===
+showSignals = input(defval = true, title="Show BUY/SELL Signal Labels")
+
+// Plot BUY signal (green label below bar)
+plotshape(showSignals and bsignal and canTrade,
+          title="Buy Signal", text="BUY", textcolor=color.white,
+          style=shape.labelup, location=location.belowbar,
+          color=color.green, size=size.small)
+
+// Plot SELL signal (red label above bar)
+plotshape(showSignals and ssignal and not onlylong and canTrade,
+          title="Sell Signal", text="SELL", textcolor=color.white,
+          style=shape.labeldown, location=location.abovebar,
+          color=color.red, size=size.small)
+
+// Plot signals blocked by time filter (gray, optional)
+showBlockedSignals = input(defval = false, title="Show Blocked Signals (gray)")
+plotshape(showBlockedSignals and bsignal and not canTrade,
+          title="Blocked Buy", text="BUY", textcolor=color.gray,
+          style=shape.labelup, location=location.belowbar,
+          color=color.new(color.gray, 50), size=size.tiny)
+plotshape(showBlockedSignals and ssignal and not onlylong and not canTrade,
+          title="Blocked Sell", text="SELL", textcolor=color.gray,
+          style=shape.labeldown, location=location.abovebar,
+          color=color.new(color.gray, 50), size=size.tiny)
+
 halfexited = false
 halfexited := nz(halfexited[1], false)
 
-// Track if TP was hit this bar (to avoid close_all overriding TP exit)
-var bool tpHitThisBar = false
-tpHitThisBar := false
-
-// RR-based Take Profit exits (check BEFORE trend reversal close)
-if useRRTP and not na(tpLevel)
-    // Long TP hit
-    if posDirection == 1 and high >= tpLevel
-        strategy.close("Buy", comment = "TP Hit")
-        tpLevel := na
-        entrySL := na
-        tpHitThisBar := true
-    // Short TP hit
-    if posDirection == -1 and low <= tpLevel
-        strategy.close("Sell", comment = "TP Hit")
-        tpLevel := na
-        entrySL := na
-        tpHitThisBar := true
-
-// Close on trend reversal (only if TP wasn't hit)
-if change(Trend) and not tpHitThisBar
+// Close on trend reversal
+if change(Trend)
     strategy.close_all()
 
 if bsignal and canTrade
     strategy.entry("Buy", true, comment = "Buy")
 if ssignal and not onlylong and canTrade
     strategy.entry("Sell", false, comment = "Sell")
+
+// RR-based Take Profit using strategy.exit() with limit orders
+// This ensures fills at the EXACT TP price, not bar close
+if useRRTP and not na(tpLevel)
+    if posDirection == 1
+        strategy.exit("TP Long", "Buy", limit=tpLevel, comment="TP Hit")
+    if posDirection == -1
+        strategy.exit("TP Short", "Sell", limit=tpLevel, comment="TP Hit")
+
+// Reset TP tracking when position closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tpLevel := na
+    entrySL := na
+    posDirection := 0
 
 cpsize = change(strategy.position_size)
 if change(strategy.position_size)
