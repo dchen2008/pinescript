@@ -1,0 +1,54 @@
+
+First Please AI deep understand pine script code logic: ./ppst_v1.pine, which copied from TradingView(TV) pine script.                                                                        
+
+We need enhance the script, detail requirement as: 
+The ppst_v1.pine indicator print out signal swing[BUY|SELL], PH, PL, CL, etc. 
+Pls watch The Pivot High(PH), Pivot Low(PL), CenterLine(CL), The Candle Close Price (CCP), Green Candle(GC), Red Candle(RC) Pls cirle mark this candle when meet below conditions
+
+After pp signal swing to buy, 
+First if price breaks above the most current PH 
+and if the candle closes with at least 50% of the candle’s body ABOVE the PH, 
+and if price is ABOVE the CL, 
+If meet above 3 conditions, and then mark circle the candle(LONG) using green
+
+After pp signal swing to sell, 
+First If price breaks below the most current PL 
+and if the candle closes with at least 50% of the candle’s body BELOW the PL, 
+and if price is BELOW the CL, 
+If meet above 3 conditions, and then mark circle the candle(SHORT) using red
+
+
+###
+The current ppst_v1.pine script tracks:                                                                                                                                                                    
+  - Pivot Points: PH (Pivot High) stored as resistance, PL (Pivot Low) stored as support                                                                                                                     
+  - Center Line (CL): Weighted average in variable center                                                                                                                                                    
+  - Trend: Trend == 1 (bullish after BUY), Trend == -1 (bearish after SELL)                                                                                                                                  
+                                                                                                                                                                                                             
+  Enhancement Logic                                                                                                                                                                                          
+                                                                                                                                                                                                             
+  LONG Entry Circle (Green) - After BUY signal:                                                                                                                                                              
+  1. high > resistance → Price breaks above PH                                                                                                                                                               
+  2. body_mid > resistance → 50%+ of candle body above PH                                                                                                                                                    
+  3. close > center → Close above Center Line                                                                                                                                                                
+                                                                                                                                                                                                             
+  SHORT Entry Circle (Red) - After SELL signal:                                                                                                                                                              
+  1. low < support → Price breaks below PL                                                                                                                                                                   
+  2. body_mid < support → 50%+ of candle body below PL                                                                                                                                                       
+  3. close < center → Close below Center Line    
+
+  @@@
+Can it change below two alert as one ?
+
+### Step 7: Add Alert Conditions (Optional)
+```pine
+alertcondition(long_entry_condition, title='Long Entry Signal', message='Long Entry - Price broke above PH')
+alertcondition(short_entry_condition, title='Short Entry Signal', message='Short Entry - Price broke below PL')
+to new aggregate two alerts as one alert:
+define one variable: 
+if pp signal is in BUY:
+    vTitle= "Long"
+if pp signal is in SELL:
+    vTitle= "Short"
+alertcondition(new_entry, title=vTitle|'Entry Signal', message='< according LONG/SHORT change the msg>')
+
+

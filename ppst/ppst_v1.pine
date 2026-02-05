@@ -1,0 +1,348 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue
+
+//@version=4
+study("PPST-V1-BT", overlay=true, format=format.price, scale=scale.right)
+prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
+Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
+Pd=input(defval = 10, title = "ATR Period", minval=1)
+showpivot = input(defval = false, title="Show Pivot Points")
+showlabel = input(defval = true, title="Show Buy/Sell Labels")
+showcl = input(defval = false, title="Show PP Center Line")
+showsr = input(defval = false, title="Show Support/Resistance")
+
+// ============ BACKTEST PARAMETERS ============
+use_time_filter = input(defval = true, title="Use Time Filter")
+bt_start_time = input(defval = timestamp("2026-01-01 00:00"), title="Backtest Start Time", type=input.time)
+bt_end_time = input(defval = timestamp("2026-12-31 23:59"), title="Backtest End Time", type=input.time)
+sl_buffer_pips = input(defval = 1.5, title="SL Spread Buffer (pips)", minval = 0, step = 0.1)
+tp_ratio = input(defval = 1.5, title="TP Ratio (R:R)", minval = 0.5, step = 0.1)
+entry_window_min = input(defval = 30, title="Entry Window (minutes)", minval = 5, step = 5)
+max_entries_per_period = input(defval = 0, title="Max Entries/Period (0=all)", minval = 0, maxval = 5)
+show_stats = input(defval = true, title="Show Statistics Table")
+
+// Fix timezone bug: compare using timestamp directly but with proper timezone handling
+// Use syminfo.timezone to ensure consistent timezone
+start_ts = timestamp(syminfo.timezone, year(bt_start_time), month(bt_start_time), dayofmonth(bt_start_time), 0, 0)
+end_ts = timestamp(syminfo.timezone, year(bt_end_time), month(bt_end_time), dayofmonth(bt_end_time), 23, 59)
+
+// Check if current bar is within backtest time range
+in_backtest_range = use_time_filter ? (time >= start_ts and time <= end_ts) : true
+
+// Debug: track bars in range
+var int bars_in_range = 0
+if in_backtest_range
+    bars_in_range := bars_in_range + 1
+
+// get Pivot High/Low
+float ph = pivothigh(prd, prd)
+float pl = pivotlow(prd, prd)
+
+// drawl Pivot Points if "showpivot" is enabled
+plotshape(ph and showpivot, text="H",  style=shape.labeldown, color=na, textcolor=color.red, location=location.abovebar, transp=0, offset = -prd)
+plotshape(pl and showpivot, text="L",  style=shape.labeldown, color=na, textcolor=color.lime, location=location.belowbar, transp=0, offset = -prd)
+
+// calculate the Center line using pivot points
+var float center = na
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        //weighted calculation
+        center := (center * 2 + lastpp) / 3
+
+// upper/lower bands calculation
+Up = center - (Factor * atr(Pd))
+Dn = center + (Factor * atr(Pd))
+
+// get the trend
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1: close < TUp[1]? -1: nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+// plot the trend
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
+ 
+plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
+
+// check and plot the signals
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+// Count signals within backtest range (for label display)
+var int signal_count_display = 0
+if (bsignal or ssignal) and in_backtest_range
+    signal_count_display := signal_count_display + 1
+
+// Show signal labels with count number when in backtest range
+plotshape(bsignal and showlabel and in_backtest_range ? Trailingsl : na, title="Buy", text="Buy", location = location.absolute, style = shape.labelup, size = size.tiny, color = color.lime, textcolor = color.black, transp = 0)
+plotshape(ssignal and showlabel and in_backtest_range ? Trailingsl : na, title="Sell", text="Sell", location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.red, textcolor = color.white, transp = 0)
+// Gray out signals outside backtest range
+plotshape(bsignal and showlabel and not in_backtest_range ? Trailingsl : na, title="Buy (out of range)", text="B", location = location.absolute, style = shape.labelup, size = size.tiny, color = color.gray, textcolor = color.white, transp = 50)
+plotshape(ssignal and showlabel and not in_backtest_range ? Trailingsl : na, title="Sell (out of range)", text="S", location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.gray, textcolor = color.white, transp = 50)
+
+//get S/R levels using Pivot Points
+float resistance = na
+float support = na
+support := pl ? pl : support[1]
+resistance := ph ? ph : resistance[1]
+
+// if enabled then show S/R levels
+plot(showsr and support ? support : na, color = showsr and support ? color.lime : na, style = plot.style_circles, offset = -prd)
+plot(showsr and resistance ? resistance : na, color = showsr and resistance ? color.red : na, style = plot.style_circles, offset = -prd)
+
+// ============ ENTRY CIRCLE MARKERS ============
+showentry = input(defval = true, title="Show Entry Circles")
+
+// Calculate candle body midpoint for 50% rule
+float body_top = max(open, close)
+float body_bottom = min(open, close)
+float body_mid = (body_top + body_bottom) / 2
+
+// Track if we have a valid PH/PL AFTER the signal (not old historical ones)
+var bool has_ph_after_signal = false
+var bool has_pl_after_signal = false
+
+// Track the resistance/support level that forms AFTER the signal
+var float entry_resistance = na
+var float entry_support = na
+
+// Reset on new signals
+if bsignal
+    has_ph_after_signal := false // Need new PH after this signal
+    entry_resistance := na       // Reset entry resistance
+if ssignal
+    has_pl_after_signal := false // Need new PL after this signal
+    entry_support := na          // Reset entry support
+
+// Detect new PH after BUY signal - update entry_resistance
+if Trend == 1 and ph
+    has_ph_after_signal := true
+    entry_resistance := ph
+
+// Detect new PL after SELL signal - update entry_support
+if Trend == -1 and pl
+    has_pl_after_signal := true
+    entry_support := pl
+
+// LONG Entry: On signal candle use original resistance, after signal use entry_resistance
+// Condition 1: open < resistance AND close > resistance (candle crosses PH from below)
+// Condition 2: body_mid > resistance (50%+ of body above PH)
+// Condition 3: close > center (close above Center Line)
+long_entry_on_signal = bsignal and not na(resistance) and open < resistance and close > resistance and body_mid > resistance and close > center
+long_entry_after_signal = Trend == 1 and not bsignal and has_ph_after_signal and not na(entry_resistance) and open < entry_resistance and close > entry_resistance and body_mid > entry_resistance and close > center
+long_entry = long_entry_on_signal or long_entry_after_signal
+
+// SHORT Entry: On signal candle use original support, after signal use entry_support
+// Condition 1: open > support AND close < support (candle crosses PL from above)
+// Condition 2: body_mid < support (50%+ of body below PL)
+// Condition 3: close < center (close below Center Line)
+short_entry_on_signal = ssignal and not na(support) and open > support and close < support and body_mid < support and close < center
+short_entry_after_signal = Trend == -1 and not ssignal and has_pl_after_signal and not na(entry_support) and open > entry_support and close < entry_support and body_mid < entry_support and close < center
+short_entry = short_entry_on_signal or short_entry_after_signal
+
+// Plot entry circles
+plotshape(long_entry and showentry, title="Long Entry", style=shape.circle, color=color.green, location=location.belowbar, size=size.small)
+plotshape(short_entry and showentry, title="Short Entry", style=shape.circle, color=color.red, location=location.abovebar, size=size.small)
+
+// ============ STATISTICS TRACKING ============
+
+// Counters (persistent across bars)
+var int total_signal_swings = 0
+var int total_buy_signals = 0
+var int total_sell_signals = 0
+var int total_entries_raw = 0           // All entries (unfiltered)
+var int total_entries_filtered = 0      // Entries after max filter
+var int total_long_entries = 0
+var int total_short_entries = 0
+var int same_bar_count = 0
+var int entries_within_window = 0
+var int periods_with_2plus_entries = 0
+
+// Debug counters - count ALL signals on chart (regardless of time filter)
+var int debug_total_signals = 0
+var int debug_total_bars = 0
+
+// Track signal timing and entry counts per period
+var int last_signal_bar = 0
+var int entries_in_current_period = 0
+
+// Helper: check if entry should be counted (respects max filter)
+is_entry_allowed() => max_entries_per_period == 0 or entries_in_current_period < max_entries_per_period
+
+// Count ALL signals on chart for debugging
+debug_total_bars := debug_total_bars + 1
+if bsignal or ssignal
+    debug_total_signals := debug_total_signals + 1
+
+// Count signal swings (only within backtest range)
+if bsignal and in_backtest_range
+    total_signal_swings := total_signal_swings + 1
+    total_buy_signals := total_buy_signals + 1
+    // Check previous period for >=2 entries
+    if entries_in_current_period >= 2
+        periods_with_2plus_entries := periods_with_2plus_entries + 1
+    // Reset for new period
+    entries_in_current_period := 0
+    last_signal_bar := bar_index
+
+if ssignal and in_backtest_range
+    total_signal_swings := total_signal_swings + 1
+    total_sell_signals := total_sell_signals + 1
+    // Check previous period for >=2 entries
+    if entries_in_current_period >= 2
+        periods_with_2plus_entries := periods_with_2plus_entries + 1
+    // Reset for new period
+    entries_in_current_period := 0
+    last_signal_bar := bar_index
+
+// Count entries (with max filter, only within backtest range)
+if long_entry and in_backtest_range
+    total_entries_raw := total_entries_raw + 1
+
+    // Only count if within max entries limit
+    if is_entry_allowed()
+        total_entries_filtered := total_entries_filtered + 1
+        total_long_entries := total_long_entries + 1
+        entries_in_current_period := entries_in_current_period + 1
+
+        // Check if same bar as signal
+        if bsignal
+            same_bar_count := same_bar_count + 1
+
+        // Check if within time window (only for minute-based timeframes)
+        bars_since_signal = bar_index - last_signal_bar
+        minutes_since_signal = bars_since_signal * timeframe.multiplier
+        if timeframe.isminutes and minutes_since_signal <= entry_window_min and not bsignal
+            entries_within_window := entries_within_window + 1
+
+if short_entry and in_backtest_range
+    total_entries_raw := total_entries_raw + 1
+
+    // Only count if within max entries limit
+    if is_entry_allowed()
+        total_entries_filtered := total_entries_filtered + 1
+        total_short_entries := total_short_entries + 1
+        entries_in_current_period := entries_in_current_period + 1
+
+        // Check if same bar as signal
+        if ssignal
+            same_bar_count := same_bar_count + 1
+
+        // Check if within time window (only for minute-based timeframes)
+        bars_since_signal = bar_index - last_signal_bar
+        minutes_since_signal = bars_since_signal * timeframe.multiplier
+        if timeframe.isminutes and minutes_since_signal <= entry_window_min and not ssignal
+            entries_within_window := entries_within_window + 1
+
+// Final period check on last bar
+if barstate.islast and entries_in_current_period >= 2
+    periods_with_2plus_entries := periods_with_2plus_entries + 1
+
+// ============ WEBHOOK ALERTS ============
+// Note: {{ticker}} returns "EURUSD", manually format as needed on receiving end
+
+// Category 1: Signal Swing (BUY/SELL) - fires first
+if bsignal
+    alert('{"type":"SIGNAL_SWING","instrument":"{{ticker}}","tf":"{{interval}}","signal":"BUY","price":' + tostring(close, "#.#####") + ',"supertrend":' + tostring(Trailingsl, "#.#####") + ',"trend":1,"time":"{{timenow}}"}', alert.freq_once_per_bar)
+if ssignal
+    alert('{"type":"SIGNAL_SWING","instrument":"{{ticker}}","tf":"{{interval}}","signal":"SELL","price":' + tostring(close, "#.#####") + ',"supertrend":' + tostring(Trailingsl, "#.#####") + ',"trend":-1,"time":"{{timenow}}"}', alert.freq_once_per_bar)
+
+// Category 2: Entry (LONG_ENTRY/SHORT_ENTRY) - fires second
+if long_entry
+    alert('{"type":"ENTRY","instrument":"{{ticker}}","tf":"{{interval}}","signal":"LONG_ENTRY","price":' + tostring(close, "#.#####") + ',"supertrend":' + tostring(Trailingsl, "#.#####") + ',"resistance":' + tostring(nz(entry_resistance, resistance), "#.#####") + ',"center":' + tostring(center, "#.#####") + ',"time":"{{timenow}}"}', alert.freq_once_per_bar)
+if short_entry
+    alert('{"type":"ENTRY","instrument":"{{ticker}}","tf":"{{interval}}","signal":"SHORT_ENTRY","price":' + tostring(close, "#.#####") + ',"supertrend":' + tostring(Trailingsl, "#.#####") + ',"support":' + tostring(nz(entry_support, support), "#.#####") + ',"center":' + tostring(center, "#.#####") + ',"time":"{{timenow}}"}', alert.freq_once_per_bar)
+
+// Legacy alertcondition (for non-webhook use)
+alertcondition(Trend == 1 and Trend[1] == -1, title='Buy Signal', message='Buy Signal')
+alertcondition(Trend == -1 and Trend[1] == 1, title='Sell Signal', message='Sell Signal')
+alertcondition(change(Trend), title='Trend Changed', message='Trend Changed')
+
+// ============ STATISTICS TABLE ============
+var table stats_table = table.new(position.top_right, 2, 18, bgcolor=color.new(color.white, 20), border_width=1)
+
+// Track actual first and last bar times on chart
+var int first_bar_time = 0
+var int last_bar_time = 0
+if barstate.isfirst
+    first_bar_time := time
+last_bar_time := time
+
+if show_stats and barstate.islast
+    // Show time range based on filter setting
+    if use_time_filter
+        // Show input filter range (using same date extraction as the filter)
+        filter_start_str = tostring(year(bt_start_time)) + "-" + tostring(month(bt_start_time), "00") + "-" + tostring(dayofmonth(bt_start_time), "00")
+        filter_end_str = tostring(year(bt_end_time)) + "-" + tostring(month(bt_end_time), "00") + "-" + tostring(dayofmonth(bt_end_time), "00")
+        table.cell(stats_table, 0, 0, filter_start_str, text_color=color.black, text_size=size.small)
+        table.cell(stats_table, 1, 0, filter_end_str, text_color=color.black, text_size=size.small)
+    else
+        // Show chart's actual time range (first bar to last bar)
+        chart_start_str = tostring(year(first_bar_time)) + "-" + tostring(month(first_bar_time), "00") + "-" + tostring(dayofmonth(first_bar_time), "00")
+        chart_end_str = tostring(year(last_bar_time)) + "-" + tostring(month(last_bar_time), "00") + "-" + tostring(dayofmonth(last_bar_time), "00")
+        table.cell(stats_table, 0, 0, chart_start_str, text_color=color.black, text_size=size.small)
+        table.cell(stats_table, 1, 0, chart_end_str, text_color=color.black, text_size=size.small)
+
+    // Show filter status and bars in range
+    filter_status = use_time_filter ? "Filter: ON" : "Filter: OFF"
+    table.cell(stats_table, 0, 1, filter_status, text_color=use_time_filter ? color.red : color.green, text_size=size.small)
+    bars_info = use_time_filter ? tostring(bars_in_range) + "/" + tostring(debug_total_bars) : tostring(debug_total_bars) + " bars"
+    table.cell(stats_table, 1, 1, bars_info, text_color=color.blue, text_size=size.small)
+
+    // Header
+    table.cell(stats_table, 0, 2, "PPST-V1", text_color=color.black, text_size=size.normal)
+    table.cell(stats_table, 1, 2, "Statistics", text_color=color.black, text_size=size.normal)
+
+    // Parameters
+    table.cell(stats_table, 0, 3, "SL Buffer", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 3, tostring(sl_buffer_pips) + " pips", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 0, 4, "TP Ratio", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 4, tostring(tp_ratio) + " R:R", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 0, 5, "Entry Window", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 5, tostring(entry_window_min) + " min", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 0, 6, "Max Entries/Period", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 6, max_entries_per_period == 0 ? "All" : tostring(max_entries_per_period), text_color=color.black, text_size=size.small)
+
+    // Divider row
+    table.cell(stats_table, 0, 7, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 7, "─────────", text_color=color.black, text_size=size.small)
+
+    // Signal counts
+    table.cell(stats_table, 0, 8, "Signal Swings", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 8, tostring(total_signal_swings) + " (B:" + tostring(total_buy_signals) + " S:" + tostring(total_sell_signals) + ")", text_color=color.black, text_size=size.small)
+
+    // Entry counts - show filtered vs raw
+    entry_label = max_entries_per_period == 0 ? "Entry Points" : "Entries (filtered)"
+    table.cell(stats_table, 0, 9, entry_label, text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, 9, tostring(total_entries_filtered) + " (L:" + tostring(total_long_entries) + " S:" + tostring(total_short_entries) + ")", text_color=color.black, text_size=size.small)
+
+    // Show raw count if filtering is active
+    if max_entries_per_period > 0
+        table.cell(stats_table, 0, 10, "Entries (raw)", text_color=color.black, text_size=size.small)
+        table.cell(stats_table, 1, 10, tostring(total_entries_raw), text_color=color.black, text_size=size.small)
+
+    // Timing stats (row index adjusts based on filtering)
+    row_offset = max_entries_per_period > 0 ? 11 : 10
+    table.cell(stats_table, 0, row_offset, "Same Bar (Sig+Entry)", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row_offset, tostring(same_bar_count), text_color=color.black, text_size=size.small)
+
+    table.cell(stats_table, 0, row_offset + 1, "Entry ≤" + tostring(entry_window_min) + "min", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row_offset + 1, tostring(entries_within_window), text_color=color.black, text_size=size.small)
+
+    table.cell(stats_table, 0, row_offset + 2, "Periods w/ ≥2 Entries", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row_offset + 2, tostring(periods_with_2plus_entries), text_color=color.black, text_size=size.small)
+
+    // Ratios
+    table.cell(stats_table, 0, row_offset + 3, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row_offset + 3, "─────────", text_color=color.black, text_size=size.small)
+
+    entry_rate = total_signal_swings > 0 ? (total_entries_filtered * 100.0 / total_signal_swings) : 0
+    table.cell(stats_table, 0, row_offset + 4, "Entry/Signal Ratio", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row_offset + 4, tostring(entry_rate, "#.#") + "%", text_color=color.black, text_size=size.small)
