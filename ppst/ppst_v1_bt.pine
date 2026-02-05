@@ -40,6 +40,15 @@ in_date_range = use_time_filter ? (time >= start_ts and time <= end_ts) : true
 // ═══════════════════════════════════════════════════════════════════════════════
 sim_group = "Order Simulation"
 
+// Entry Mode Selection
+// 0 = Signal Swing only
+// 1 = Signal Swing + Circle on same bar
+// 2 = Circle within X minutes from signal
+// 3 = Nth Circle after signal
+i_entry_mode = input.string("Signal Swing", "Entry Mode", options=["Signal Swing", "Signal + Circle Same Bar", "Circle within Time Window", "Nth Circle"], group=sim_group)
+i_entry_window_min = input.int(30, "Entry Time Window (minutes)", group=sim_group, minval=5, step=5)
+i_entry_circle_num = input.int(1, "Circle Number for Entry", group=sim_group, minval=1, maxval=10)
+
 // Position Sizing
 i_units = input.int(10000, "Position Size (Units)", group=sim_group, minval=1000, step=1000)
 
@@ -173,13 +182,24 @@ var bool has_pl_after_signal = false
 var float entry_resistance = na
 var float entry_support = na
 
+// Track signal timing and circle count for entry modes
+var int last_signal_bar = 0
+var int last_signal_time = 0
+var int circle_count_since_signal = 0
+
 // Reset on new signals
 if bsignal
     has_ph_after_signal := false // Need new PH after this signal
     entry_resistance := na       // Reset entry resistance
+    last_signal_bar := bar_index
+    last_signal_time := time
+    circle_count_since_signal := 0
 if ssignal
     has_pl_after_signal := false // Need new PL after this signal
     entry_support := na          // Reset entry support
+    last_signal_bar := bar_index
+    last_signal_time := time
+    circle_count_since_signal := 0
 
 // Detect new PH after BUY signal - update entry_resistance
 if Trend == 1 and ph
@@ -191,25 +211,60 @@ if Trend == -1 and pl
     has_pl_after_signal := true
     entry_support := pl
 
-// LONG Entry: On signal candle use original resistance, after signal use entry_resistance
+// LONG Entry Circle: On signal candle use original resistance, after signal use entry_resistance
 // Condition 1: open < resistance AND close > resistance (candle crosses PH from below)
 // Condition 2: body_mid > resistance (50%+ of body above PH)
 // Condition 3: close > center (close above Center Line)
-long_entry_on_signal = bsignal and not na(resistance) and open < resistance and close > resistance and body_mid > resistance and close > center
-long_entry_after_signal = Trend == 1 and not bsignal and has_ph_after_signal and not na(entry_resistance) and open < entry_resistance and close > entry_resistance and body_mid > entry_resistance and close > center
-long_entry = long_entry_on_signal or long_entry_after_signal
+long_circle_on_signal = bsignal and not na(resistance) and open < resistance and close > resistance and body_mid > resistance and close > center
+long_circle_after_signal = Trend == 1 and not bsignal and has_ph_after_signal and not na(entry_resistance) and open < entry_resistance and close > entry_resistance and body_mid > entry_resistance and close > center
+long_circle = long_circle_on_signal or long_circle_after_signal
 
-// SHORT Entry: On signal candle use original support, after signal use entry_support
+// SHORT Entry Circle: On signal candle use original support, after signal use entry_support
 // Condition 1: open > support AND close < support (candle crosses PL from above)
 // Condition 2: body_mid < support (50%+ of body below PL)
 // Condition 3: close < center (close below Center Line)
-short_entry_on_signal = ssignal and not na(support) and open > support and close < support and body_mid < support and close < center
-short_entry_after_signal = Trend == -1 and not ssignal and has_pl_after_signal and not na(entry_support) and open > entry_support and close < entry_support and body_mid < entry_support and close < center
-short_entry = short_entry_on_signal or short_entry_after_signal
+short_circle_on_signal = ssignal and not na(support) and open > support and close < support and body_mid < support and close < center
+short_circle_after_signal = Trend == -1 and not ssignal and has_pl_after_signal and not na(entry_support) and open > entry_support and close < entry_support and body_mid < entry_support and close < center
+short_circle = short_circle_on_signal or short_circle_after_signal
 
-// Plot entry circles
-plotshape(long_entry and showentry and in_date_range, title="Long Entry", style=shape.circle, color=color.green, location=location.belowbar, size=size.small)
-plotshape(short_entry and showentry and in_date_range, title="Short Entry", style=shape.circle, color=color.red, location=location.abovebar, size=size.small)
+// Count circles since last signal
+if long_circle or short_circle
+    circle_count_since_signal := circle_count_since_signal + 1
+
+// Calculate time since last signal (in minutes)
+minutes_since_signal = (time - last_signal_time) / 60000
+
+// Determine entry based on selected mode
+// Mode: Signal Swing - enter on any signal swing
+long_entry_signal_swing = bsignal
+short_entry_signal_swing = ssignal
+
+// Mode: Signal + Circle Same Bar - signal and circle on same bar
+long_entry_same_bar = bsignal and long_circle
+short_entry_same_bar = ssignal and short_circle
+
+// Mode: Circle within Time Window - circle within X minutes of signal
+long_entry_time_window = long_circle and minutes_since_signal <= i_entry_window_min and Trend == 1
+short_entry_time_window = short_circle and minutes_since_signal <= i_entry_window_min and Trend == -1
+
+// Mode: Nth Circle - enter on specific circle number
+long_entry_nth_circle = long_circle and circle_count_since_signal == i_entry_circle_num and Trend == 1
+short_entry_nth_circle = short_circle and circle_count_since_signal == i_entry_circle_num and Trend == -1
+
+// Final entry decision based on mode
+long_entry = i_entry_mode == "Signal Swing" ? long_entry_signal_swing :
+             i_entry_mode == "Signal + Circle Same Bar" ? long_entry_same_bar :
+             i_entry_mode == "Circle within Time Window" ? long_entry_time_window :
+             i_entry_mode == "Nth Circle" ? long_entry_nth_circle : false
+
+short_entry = i_entry_mode == "Signal Swing" ? short_entry_signal_swing :
+              i_entry_mode == "Signal + Circle Same Bar" ? short_entry_same_bar :
+              i_entry_mode == "Circle within Time Window" ? short_entry_time_window :
+              i_entry_mode == "Nth Circle" ? short_entry_nth_circle : false
+
+// Plot entry circles (always show circles regardless of entry mode)
+plotshape(long_circle and showentry and in_date_range, title="Long Entry Circle", style=shape.circle, color=color.green, location=location.belowbar, size=size.small)
+plotshape(short_circle and showentry and in_date_range, title="Short Entry Circle", style=shape.circle, color=color.red, location=location.abovebar, size=size.small)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // POSITION MANAGEMENT VARIABLES
@@ -227,14 +282,18 @@ var int position_dir = 0  // 1=long, -1=short, 0=flat
 // ENTRY LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Entry conditions
-can_enter_long = long_entry and strategy.position_size == 0 and in_date_range
-can_enter_short = short_entry and strategy.position_size == 0 and in_date_range
+// Ensure ATR is valid before calculating SL
+atr_value = ta.atr(Pd)
+atr_valid = not na(atr_value)
+
+// Entry conditions - require valid ATR for ATR-based SL
+can_enter_long = long_entry and strategy.position_size == 0 and in_date_range and (i_sl_type != "ATR" or atr_valid)
+can_enter_short = short_entry and strategy.position_size == 0 and in_date_range and (i_sl_type != "ATR" or atr_valid)
 
 if can_enter_long
-    entry_price := get_entry_price(true)
+    entry_price := close  // Use actual close price for calculation
 
-    // Calculate SL
+    // Calculate SL distance
     sl_dist = i_sl_type == "ATR" ? calc_atr_sl() : pips_to_price(i_sl_pips)
     sl_price := entry_price - sl_dist - pips_to_price(i_sl_buffer)
 
@@ -251,15 +310,11 @@ if can_enter_long
     position_dir := 1
 
     strategy.entry("Long", strategy.long, qty=i_units)
-    if na(tp_price)
-        strategy.exit("Long Exit", "Long", stop=sl_price)
-    else
-        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
 
 if can_enter_short
-    entry_price := get_entry_price(false)
+    entry_price := close  // Use actual close price for calculation
 
-    // Calculate SL
+    // Calculate SL distance
     sl_dist = i_sl_type == "ATR" ? calc_atr_sl() : pips_to_price(i_sl_pips)
     sl_price := entry_price + sl_dist + pips_to_price(i_sl_buffer)
 
@@ -276,6 +331,38 @@ if can_enter_short
     position_dir := -1
 
     strategy.entry("Short", strategy.short, qty=i_units)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXIT ORDER MANAGEMENT - Run every bar when position is open
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// If SL/TP are NA but position is open, try to calculate them using position avg price
+if strategy.position_size != 0 and na(sl_price)
+    actual_entry = strategy.position_avg_price
+    if not na(actual_entry) and not na(atr_value)
+        sl_dist_calc = i_sl_type == "ATR" ? (atr_value * i_sl_atr_mult) : pips_to_price(i_sl_pips)
+        if strategy.position_size > 0
+            sl_price := actual_entry - sl_dist_calc - pips_to_price(i_sl_buffer)
+            if i_tp_type == "Risk Ratio"
+                tp_price := actual_entry + (sl_dist_calc * i_tp_ratio)
+            else if i_tp_type == "Fixed Pips"
+                tp_price := actual_entry + pips_to_price(i_tp_pips)
+        else
+            sl_price := actual_entry + sl_dist_calc + pips_to_price(i_sl_buffer)
+            if i_tp_type == "Risk Ratio"
+                tp_price := actual_entry - (sl_dist_calc * i_tp_ratio)
+            else if i_tp_type == "Fixed Pips"
+                tp_price := actual_entry - pips_to_price(i_tp_pips)
+        entry_price := actual_entry
+
+// Always set exit orders when position is open (ensures exits are active)
+if strategy.position_size > 0 and not na(sl_price)
+    if na(tp_price)
+        strategy.exit("Long Exit", "Long", stop=sl_price)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+
+if strategy.position_size < 0 and not na(sl_price)
     if na(tp_price)
         strategy.exit("Short Exit", "Short", stop=sl_price)
     else
@@ -379,7 +466,7 @@ plot(plot_sim and strategy.position_size != 0 ? entry_price : na,
 // STATISTICS TABLE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-var table stats_table = table.new(position.top_right, 2, 20, bgcolor=color.new(color.white, 80), border_width=1)
+var table stats_table = table.new(position.top_right, 2, 28, bgcolor=color.new(color.white, 80), border_width=1)
 
 // Track actual first and last bar times on chart
 var int first_bar_time = 0
@@ -394,20 +481,33 @@ total_bars := total_bars + 1
 if in_date_range
     bars_in_range := bars_in_range + 1
 
-// Count signals and entries for stats
+// Count signals, circles, entries, and blocked entries for stats
 var int total_buy_signals = 0
 var int total_sell_signals = 0
+var int total_long_circles = 0
+var int total_short_circles = 0
 var int total_long_entries = 0
 var int total_short_entries = 0
+var int blocked_by_position = 0
 
 if bsignal and in_date_range
     total_buy_signals := total_buy_signals + 1
 if ssignal and in_date_range
     total_sell_signals := total_sell_signals + 1
+if long_circle and in_date_range
+    total_long_circles := total_long_circles + 1
+if short_circle and in_date_range
+    total_short_circles := total_short_circles + 1
 if can_enter_long
     total_long_entries := total_long_entries + 1
 if can_enter_short
     total_short_entries := total_short_entries + 1
+
+// Count entries blocked because position already open
+if long_entry and strategy.position_size != 0 and in_date_range
+    blocked_by_position := blocked_by_position + 1
+if short_entry and strategy.position_size != 0 and in_date_range
+    blocked_by_position := blocked_by_position + 1
 
 if show_stats and barstate.islast
     // Row counter for dynamic positioning
@@ -441,6 +541,15 @@ if show_stats and barstate.islast
     // Divider
     table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Entry Mode
+    table.cell(stats_table, 0, row, "Entry Mode", text_color=color.black, text_size=size.small)
+    entry_mode_info = i_entry_mode == "Signal Swing" ? "Signal Swing" :
+                      i_entry_mode == "Signal + Circle Same Bar" ? "Sig+Circle" :
+                      i_entry_mode == "Circle within Time Window" ? "Circle <" + str.tostring(i_entry_window_min) + "m" :
+                      i_entry_mode == "Nth Circle" ? "Circle #" + str.tostring(i_entry_circle_num) : "Unknown"
+    table.cell(stats_table, 1, row, entry_mode_info, text_color=color.blue, text_size=size.small)
     row := row + 1
 
     // Strategy Parameters
@@ -482,9 +591,19 @@ if show_stats and barstate.islast
     table.cell(stats_table, 1, row, "B:" + str.tostring(total_buy_signals) + " S:" + str.tostring(total_sell_signals), text_color=color.black, text_size=size.small)
     row := row + 1
 
-    // Entry counts
-    table.cell(stats_table, 0, row, "Entries", text_color=color.black, text_size=size.small)
+    // Circle counts
+    table.cell(stats_table, 0, row, "Circles", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "L:" + str.tostring(total_long_circles) + " S:" + str.tostring(total_short_circles), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Entry counts (orders placed)
+    table.cell(stats_table, 0, row, "Orders", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, "L:" + str.tostring(total_long_entries) + " S:" + str.tostring(total_short_entries), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Blocked entries (position already open)
+    table.cell(stats_table, 0, row, "Blocked", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(blocked_by_position) + " (pos open)", text_color=blocked_by_position > 0 ? color.orange : color.gray, text_size=size.small)
     row := row + 1
 
     // Divider
@@ -522,3 +641,27 @@ if show_stats and barstate.islast
     // Max Drawdown
     table.cell(stats_table, 0, row, "Max Drawdown", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, str.tostring(strategy.max_drawdown, "#.##"), text_color=color.red, text_size=size.small)
+    row := row + 1
+
+    // Debug: Current position info
+    table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Position", text_color=color.black, text_size=size.small)
+    pos_info = strategy.position_size > 0 ? "LONG " + str.tostring(strategy.position_size) :
+               strategy.position_size < 0 ? "SHORT " + str.tostring(math.abs(strategy.position_size)) : "FLAT"
+    table.cell(stats_table, 1, row, pos_info, text_color=strategy.position_size != 0 ? color.blue : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Open P/L", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(strategy.openprofit, "#.##"), text_color=strategy.openprofit >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    // Show SL/TP prices for debugging
+    table.cell(stats_table, 0, row, "SL Price", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(sl_price) ? "NA" : str.tostring(sl_price, "#.#####"), text_color=na(sl_price) ? color.red : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "TP Price", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(tp_price) ? "NA" : str.tostring(tp_price, "#.#####"), text_color=na(tp_price) ? color.red : color.black, text_size=size.small)
