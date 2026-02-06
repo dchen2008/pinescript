@@ -8,8 +8,7 @@ strategy("PPST[OfficalBacktest]", overlay=true,
          initial_capital=10000,
          currency=currency.USD,
          commission_type=strategy.commission.percent,
-         commission_value=0.01,
-         slippage=15)  // 1.5 pips spread (15 points for 5-decimal forex)
+         commission_value=0.01)
 prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
 Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
 Pd=input(defval = 10, title = "ATR Period", minval=1)
@@ -21,6 +20,11 @@ useRiskBasedSizing = input(defval = false, title="Use Risk-Based Position Sizing
 riskPerTrade = input(defval = 100.0, title="Risk Per Trade ($)", minval=1.0)
 minPositionSize = input(defval = 1000, title="Min Position Size (units)", minval=100)
 maxPositionSize = input(defval = 500000, title="Max Position Size (units)", minval=1000)
+
+// === SPREAD COST ===
+spreadPips = input(defval = 1.5, title="Spread Cost (pips)", minval=0, step=0.1)
+// Convert pips to price (1 pip = 10 points for 5-decimal forex)
+spreadPrice = spreadPips * syminfo.mintick * 10
 
 // === TAKE PROFIT OPTIONS ===
 useRRTP = input(defval = false, title="Use RR-Based Take Profit")
@@ -136,18 +140,18 @@ calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : minPositionSize
 positionSize = useRiskBasedSizing ? max(minPositionSize, min(maxPositionSize, calcPositionSize)) : na
 
 if newLongEntry
-    // For LONG: SL is below entry (SuperTrend), TP is above entry
-    entryPrice := strategy.position_avg_price
+    // For LONG: Buy at ASK (mid + spread), SL is below entry, TP is above entry
+    entryPrice := strategy.position_avg_price + spreadPrice  // Adjust for spread (buy at ask)
     entrySL := TUp  // SuperTrend lower band as SL
-    slDistance = entryPrice - entrySL  // Actual risk distance
+    slDistance = entryPrice - entrySL  // Actual risk distance (includes spread)
     tpLevel := entryPrice + (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := 1
 
 if newShortEntry
-    // For SHORT: SL is above entry (SuperTrend), TP is below entry
-    entryPrice := strategy.position_avg_price
+    // For SHORT: Sell at BID (mid - spread), SL is above entry, TP is below entry
+    entryPrice := strategy.position_avg_price - spreadPrice  // Adjust for spread (sell at bid)
     entrySL := TDown  // SuperTrend upper band as SL
-    slDistance = entrySL - entryPrice  // Actual risk distance
+    slDistance = entrySL - entryPrice  // Actual risk distance (includes spread)
     tpLevel := entryPrice - (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := -1
 
