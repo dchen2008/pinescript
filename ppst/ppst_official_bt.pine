@@ -135,17 +135,19 @@ calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : minPositionSize
 positionSize = useRiskBasedSizing ? max(minPositionSize, min(maxPositionSize, calcPositionSize)) : na
 
 if newLongEntry
-    // For LONG: SL is below entry (use SuperTrend as trailing SL), TP is above entry
+    // For LONG: SL is below entry (SuperTrend), TP is above entry
     entryPrice := strategy.position_avg_price
-    entrySL := TUp  // Start with current SuperTrend lower band
-    tpLevel := entryPrice + (atrRisk * rrRatio)
+    entrySL := TUp  // SuperTrend lower band as SL
+    slDistance = entryPrice - entrySL  // Actual risk distance
+    tpLevel := entryPrice + (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := 1
 
 if newShortEntry
-    // For SHORT: SL is above entry (use SuperTrend as trailing SL), TP is below entry
+    // For SHORT: SL is above entry (SuperTrend), TP is below entry
     entryPrice := strategy.position_avg_price
-    entrySL := TDown  // Start with current SuperTrend upper band
-    tpLevel := entryPrice - (atrRisk * rrRatio)
+    entrySL := TDown  // SuperTrend upper band as SL
+    slDistance = entrySL - entryPrice  // Actual risk distance
+    tpLevel := entryPrice - (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := -1
 
 // Trail the SL with SuperTrend (only moves in favorable direction)
@@ -217,24 +219,20 @@ plotshape(showBlockedSignals and ssignal and not onlylong and not canTrade,
 halfexited = false
 halfexited := nz(halfexited[1], false)
 
-// Close on trend reversal (only when NOT using RR-based TP/SL)
-// When useRRTP is enabled, the trailing SL handles exits
-if change(Trend) and not useRRTP
-    strategy.close_all()
-
+// Entry logic - reversal strategy (entry in opposite direction auto-closes existing position)
 if bsignal and canTrade
     if useRiskBasedSizing
-        strategy.entry("Buy", true, qty=positionSize, comment = "Buy")
+        strategy.entry("Buy", true, qty=positionSize, comment="Buy")
     else
-        strategy.entry("Buy", true, comment = "Buy")
+        strategy.entry("Buy", true, comment="Buy")
 if ssignal and not onlylong and canTrade
     if useRiskBasedSizing
-        strategy.entry("Sell", false, qty=positionSize, comment = "Sell")
+        strategy.entry("Sell", false, qty=positionSize, comment="Sell")
     else
-        strategy.entry("Sell", false, comment = "Sell")
+        strategy.entry("Sell", false, comment="Sell")
 
-// RR-based Take Profit AND Stop Loss using strategy.exit() with limit/stop orders
-// This ensures fills at the EXACT TP/SL price, not bar close
+// TP and SL exits (only active when useRRTP enabled)
+// These trigger BEFORE reversal if price reaches TP/SL level
 if useRRTP and not na(tpLevel) and not na(entrySL)
     if posDirection == 1
         strategy.exit("TP Long", "Buy", limit=tpLevel, comment="TP Hit")
