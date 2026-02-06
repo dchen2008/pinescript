@@ -135,18 +135,26 @@ calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : minPositionSize
 positionSize = useRiskBasedSizing ? max(minPositionSize, min(maxPositionSize, calcPositionSize)) : na
 
 if newLongEntry
-    // For LONG: SL is below entry, TP is above entry
+    // For LONG: SL is below entry (use SuperTrend as trailing SL), TP is above entry
     entryPrice := strategy.position_avg_price
-    entrySL := entryPrice - atrRisk
+    entrySL := TUp  // Start with current SuperTrend lower band
     tpLevel := entryPrice + (atrRisk * rrRatio)
     posDirection := 1
 
 if newShortEntry
-    // For SHORT: SL is above entry, TP is below entry
+    // For SHORT: SL is above entry (use SuperTrend as trailing SL), TP is below entry
     entryPrice := strategy.position_avg_price
-    entrySL := entryPrice + atrRisk
+    entrySL := TDown  // Start with current SuperTrend upper band
     tpLevel := entryPrice - (atrRisk * rrRatio)
     posDirection := -1
+
+// Trail the SL with SuperTrend (only moves in favorable direction)
+if posDirection == 1 and strategy.position_size > 0
+    // LONG: Trail SL up with TUp (never down)
+    entrySL := max(entrySL, TUp)
+if posDirection == -1 and strategy.position_size < 0
+    // SHORT: Trail SL down with TDown (never up)
+    entrySL := min(entrySL, TDown)
 
 // Plot TP level and Entry SL for debugging
 plot(useRRTP and showTPLine and not na(tpLevel) ? tpLevel : na,
@@ -209,8 +217,9 @@ plotshape(showBlockedSignals and ssignal and not onlylong and not canTrade,
 halfexited = false
 halfexited := nz(halfexited[1], false)
 
-// Close on trend reversal
-if change(Trend)
+// Close on trend reversal (only when NOT using RR-based TP/SL)
+// When useRRTP is enabled, the trailing SL handles exits
+if change(Trend) and not useRRTP
     strategy.close_all()
 
 if bsignal and canTrade
