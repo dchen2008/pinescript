@@ -8,7 +8,8 @@ strategy("PPST[OfficalBacktest]", overlay=true,
          initial_capital=10000,
          currency=currency.USD,
          commission_type=strategy.commission.percent,
-         commission_value=0.01)
+         commission_value=0.01,
+         slippage=15)  // 1.5 pips spread (15 points for 5-decimal forex)
 prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
 Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
 Pd=input(defval = 10, title = "ATR Period", minval=1)
