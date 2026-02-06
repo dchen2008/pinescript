@@ -15,6 +15,12 @@ Pd=input(defval = 10, title = "ATR Period", minval=1)
 minrateu = input(defval = 1.0, title="Min profit Rate if Center Line Used", minval = 0)
 usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%")
 
+// === POSITION SIZING ===
+useRiskBasedSizing = input(defval = false, title="Use Risk-Based Position Sizing")
+riskPerTrade = input(defval = 100.0, title="Risk Per Trade ($)", minval=1.0)
+minPositionSize = input(defval = 1000, title="Min Position Size (units)", minval=100)
+maxPositionSize = input(defval = 500000, title="Max Position Size (units)", minval=1000)
+
 // === TAKE PROFIT OPTIONS ===
 useRRTP = input(defval = false, title="Use RR-Based Take Profit")
 rrRatio = input(defval = 1.5, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
@@ -122,6 +128,12 @@ newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_siz
 currentATR = atr(Pd)
 atrRisk = Factor * currentATR
 
+// Calculate position size based on risk
+// Position Size = Risk Amount / Stop Loss Distance
+calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : minPositionSize
+// Clamp to min/max limits
+positionSize = useRiskBasedSizing ? max(minPositionSize, min(maxPositionSize, calcPositionSize)) : na
+
 if newLongEntry
     // For LONG: SL is below entry, TP is above entry
     entryPrice := strategy.position_avg_price
@@ -150,7 +162,8 @@ if newLongEntry and showDebugLabels
               "\nTP:" + tostring(tpLevel, "#.#####") +
               "\nSL:" + tostring(entrySL, "#.#####") +
               "\nATR:" + tostring(currentATR, "#.#####") +
-              "\nRisk:" + tostring(atrRisk, "#.#####"),
+              "\nRisk$:" + tostring(atrRisk, "#.#####") +
+              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
               color=color.green, textcolor=color.white, size=size.small)
 if newShortEntry and showDebugLabels
     label.new(bar_index, low,
@@ -158,7 +171,8 @@ if newShortEntry and showDebugLabels
               "\nTP:" + tostring(tpLevel, "#.#####") +
               "\nSL:" + tostring(entrySL, "#.#####") +
               "\nATR:" + tostring(currentATR, "#.#####") +
-              "\nRisk:" + tostring(atrRisk, "#.#####"),
+              "\nRisk$:" + tostring(atrRisk, "#.#####") +
+              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
               color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
 
 plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
@@ -200,17 +214,25 @@ if change(Trend)
     strategy.close_all()
 
 if bsignal and canTrade
-    strategy.entry("Buy", true, comment = "Buy")
+    if useRiskBasedSizing
+        strategy.entry("Buy", true, qty=positionSize, comment = "Buy")
+    else
+        strategy.entry("Buy", true, comment = "Buy")
 if ssignal and not onlylong and canTrade
-    strategy.entry("Sell", false, comment = "Sell")
+    if useRiskBasedSizing
+        strategy.entry("Sell", false, qty=positionSize, comment = "Sell")
+    else
+        strategy.entry("Sell", false, comment = "Sell")
 
-// RR-based Take Profit using strategy.exit() with limit orders
-// This ensures fills at the EXACT TP price, not bar close
-if useRRTP and not na(tpLevel)
+// RR-based Take Profit AND Stop Loss using strategy.exit() with limit/stop orders
+// This ensures fills at the EXACT TP/SL price, not bar close
+if useRRTP and not na(tpLevel) and not na(entrySL)
     if posDirection == 1
         strategy.exit("TP Long", "Buy", limit=tpLevel, comment="TP Hit")
+        strategy.exit("SL Long", "Buy", stop=entrySL, comment="SL Hit")
     if posDirection == -1
         strategy.exit("TP Short", "Sell", limit=tpLevel, comment="TP Hit")
+        strategy.exit("SL Short", "Sell", stop=entrySL, comment="SL Hit")
 
 // Reset TP tracking when position closes
 if strategy.position_size == 0 and strategy.position_size[1] != 0
