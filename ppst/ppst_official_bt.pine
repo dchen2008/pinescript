@@ -17,7 +17,7 @@ usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%"
 
 // === POSITION SIZING ===
 useRiskBasedSizing = input(defval = false, title="Use Risk-Based Position Sizing")
-riskPerTrade = input(defval = 100.0, title="Risk Per Trade ($)", minval=1.0)
+riskPercent = input(defval = 1.0, title="Risk Per Trade (% of Balance)", minval=0.1, step=0.1, tooltip="Dynamic risk: 1% of $10,000 = $100 risk per trade. Scales with equity.")
 minPositionSize = input(defval = 1000, title="Min Position Size (units)", minval=100)
 maxPositionSize = input(defval = 500000, title="Max Position Size (units)", minval=1000)
 
@@ -36,15 +36,12 @@ onlylong = input(defval = false, title="Enter Only Long Position")
 float minrate = minrateu / 100
 
 // === TIME FILTERS ===
-// Backtest date range
-useTimeFilter = input(defval = true, title="Use Backtest Date Range")
-startDate = input(defval = timestamp("2024-01-01 00:00"), title="Start Date", type=input.time)
-endDate = input(defval = timestamp("2025-12-31 23:59"), title="End Date", type=input.time)
-
 // Daily quiet window (no trading)
 useQuietWindow = input(defval = true, title="Use Daily Quiet Window")
-quietStartHour = input(defval = 12, title="Quiet Window Start Hour (0-23)", minval=0, maxval=23)
-quietEndHour = input(defval = 18, title="Quiet Window End Hour (0-23)", minval=0, maxval=23)
+quietStartHour = input(defval = 13, title="Quiet Window Start Hour (0-23)", minval=0, maxval=23)
+quietStartMin = input(defval = 30, title="Quiet Window Start Minute (0-59)", minval=0, maxval=59)
+quietEndHour = input(defval = 16, title="Quiet Window End Hour (0-23)", minval=0, maxval=23)
+quietEndMin = input(defval = 30, title="Quiet Window End Minute (0-59)", minval=0, maxval=59)
 
 // Market open window (Sunday 2pm to Friday 2pm PT)
 useMarketWindow = input(defval = true, title="Use Market Open Window")
@@ -55,16 +52,20 @@ marketCloseHour = input(defval = 14, title="Market Close Hour", minval=0, maxval
 
 // Time calculations (using PT timezone via exchange timezone or chart)
 currentHour = hour(time, "America/Los_Angeles")
+currentMin = minute(time, "America/Los_Angeles")
 currentDay = dayofweek(time, "America/Los_Angeles")
 
-// Check if within backtest date range
-inDateRange = (not useTimeFilter) or (time >= startDate and time <= endDate)
+// Convert to minutes since midnight for precise quiet window comparison
+currentTimeInMin = currentHour * 60 + currentMin
+quietStartInMin = quietStartHour * 60 + quietStartMin
+quietEndInMin = quietEndHour * 60 + quietEndMin
 
 // Check if NOT in quiet window (quiet window = no trading)
-// Handle case where quiet window crosses midnight
+// Uses minute precision for 13:30-16:30 style windows
 notInQuietWindow = (not useQuietWindow) or
-     (quietStartHour < quietEndHour ? (currentHour < quietStartHour or currentHour >= quietEndHour) :
-     (currentHour >= quietEndHour and currentHour < quietStartHour))
+     (quietStartInMin < quietEndInMin ?
+      (currentTimeInMin < quietStartInMin or currentTimeInMin >= quietEndInMin) :
+      (currentTimeInMin >= quietEndInMin and currentTimeInMin < quietStartInMin))
 
 // Check if market is open (Sunday 2pm PT to Friday 2pm PT)
 // dayofweek: 1=Sunday, 2=Monday, ... 6=Friday, 7=Saturday
@@ -81,7 +82,7 @@ isMarketOpen() =>
         afterSundayOpen and beforeFridayClose and notWeekend
 
 // Combined filter: all conditions must be true to trade
-canTrade = inDateRange and notInQuietWindow and isMarketOpen()
+canTrade = notInQuietWindow and isMarketOpen()
 
 // Visual indicator for no-trade periods
 showNoTradeZones = input(defval = false, title="Show No-Trade Zones (Background)")
@@ -132,6 +133,9 @@ newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_siz
 // Current ATR value for risk calculation
 currentATR = atr(Pd)
 atrRisk = Factor * currentATR
+
+// Dynamic risk: % of current equity (compound sizing)
+riskPerTrade = strategy.equity * riskPercent / 100
 
 // Calculate position size based on risk
 // Position Size = Risk Amount / Stop Loss Distance
@@ -235,6 +239,15 @@ if ssignal and not onlylong and canTrade
         strategy.entry("Sell", false, qty=positionSize, comment="Sell")
     else
         strategy.entry("Sell", false, comment="Sell")
+
+// Close existing positions when entering quiet window
+// Fires on the first bar where quiet window becomes active
+enteringQuietWindow = useQuietWindow and not notInQuietWindow and nz(notInQuietWindow[1], true)
+if enteringQuietWindow
+    if strategy.position_size > 0
+        strategy.close("Buy", comment="Quiet Close")
+    if strategy.position_size < 0
+        strategy.close("Sell", comment="Quiet Close")
 
 // TP and SL exits (only active when useRRTP enabled)
 // These trigger BEFORE reversal if price reaches TP/SL level
