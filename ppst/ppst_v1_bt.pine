@@ -5,14 +5,15 @@
 strategy(title="PPST V1 Backtest", shorttitle="PPST-V1-BT", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=10000,
          initial_capital=10000, currency=currency.USD,
-         pyramiding=0, process_orders_on_close=false)
+         pyramiding=0, process_orders_on_close=false,
+         max_bars_back=5000)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INDICATOR PARAMETERS
 // ═══════════════════════════════════════════════════════════════════════════════
 ind_group = "Indicator Settings"
 prd = input.int(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50, group=ind_group)
-Factor = input.float(defval = 3, title = "ATR Factor", minval = 1, step = 0.1, group=ind_group)
+Factor = input.float(defval = 4.5, title = "ATR Factor", minval = 1, step = 0.1, group=ind_group)
 Pd = input.int(defval = 10, title = "ATR Period", minval=1, group=ind_group)
 showpivot = input.bool(defval = false, title="Show Pivot Points", group=ind_group)
 showlabel = input.bool(defval = true, title="Show Buy/Sell Labels", group=ind_group)
@@ -50,31 +51,28 @@ i_entry_window_min = input.int(30, "Entry Time Window (minutes)", group=sim_grou
 i_entry_circle_num = input.int(1, "Circle Number for Entry", group=sim_group, minval=1, maxval=10)
 
 // Position Sizing
-i_units = input.int(10000, "Position Size (Units)", group=sim_group, minval=1000, step=1000)
+i_sizing_mode = input.string("Compound Risk %", "Sizing Mode", options=["Compound Risk %", "Fixed Units"], group=sim_group)
+i_risk_percent = input.float(1.5, "Risk Per Trade (%)", group=sim_group, minval=0.1, step=0.1)
+i_units = input.int(10000, "Fixed Position Size (Units)", group=sim_group, minval=1000, step=1000)
 
 // Spread Simulation
 i_spread_pips = input.float(1.5, "Spread (Pips)", group=sim_group, minval=0, step=0.1)
 
-// Stop Loss
-i_sl_type = input.string("ATR", "SL Type", options=["ATR", "Fixed Pips"], group=sim_group)
-i_sl_atr_mult = input.float(1.5, "SL ATR Multiplier", group=sim_group, minval=0.5, step=0.1)
-i_sl_pips = input.float(20.0, "SL Fixed Pips", group=sim_group, minval=5, step=1)
-i_sl_buffer = input.float(1.5, "SL Buffer (Pips)", group=sim_group, minval=0, step=0.5)
+// Entry Distance Filter
+i_max_entry_dist = input.float(20.0, "Max Entry Distance from SuperTrend (Pips)", group=sim_group, minval=1, step=0.5)
+
+// Stop Loss - uses Pivot HIGH/LOW and SuperTrend midpoint method
+i_sl_buffer = input.float(1.0, "SL Buffer (Pips)", group=sim_group, minval=0, step=0.5)
 
 // Take Profit
 i_tp_type = input.string("Risk Ratio", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=sim_group)
-i_tp_ratio = input.float(1.5, "TP Risk:Reward Ratio", group=sim_group, minval=0.5, step=0.1)
+i_tp_ratio = input.float(2.0, "TP Risk:Reward Ratio", group=sim_group, minval=0.5, step=0.1)
 i_tp_pips = input.float(30.0, "TP Fixed Pips", group=sim_group, minval=5, step=1)
-
-// Trailing Stop
-i_trail_enabled = input.bool(true, "Enable Trailing Stop", group=sim_group)
-i_trail_atr_mult = input.float(1.0, "Trail ATR Multiplier", group=sim_group, minval=0.5, step=0.1)
-i_trail_activation = input.float(10.0, "Trail Activation (Pips in Profit)", group=sim_group, minval=0, step=1)
 
 // Break-Even
 i_be_enabled = input.bool(true, "Enable Break-Even", group=sim_group)
-i_be_trigger = input.float(15.0, "BE Trigger (Pips in Profit)", group=sim_group, minval=5, step=1)
-i_be_offset = input.float(2.0, "BE Offset (Pips Above Entry)", group=sim_group, minval=0, step=0.5)
+i_be_trigger = input.float(10.0, "BE Trigger (Pips in Profit)", group=sim_group, minval=5, step=1)
+i_be_offset = input.float(1.0, "BE Offset (Pips Above Entry)", group=sim_group, minval=0, step=0.5)
 
 // Visual Options
 plot_sim = input.bool(true, "Show SL/TP Levels", group=sim_group)
@@ -94,14 +92,39 @@ pips_to_price(pips) =>
 price_to_pips(price_diff) =>
     price_diff / pip_value()
 
-// Calculate ATR-based stop distance
-calc_atr_sl() =>
-    ta.atr(Pd) * i_sl_atr_mult
+// Calculate distance from PP SuperTrend in pips
+dist_from_supertrend(price, supertrend_val) =>
+    price_to_pips(math.abs(price - supertrend_val))
 
-// Calculate spread-adjusted entry price
-get_entry_price(is_long) =>
-    spread_adj = pips_to_price(i_spread_pips / 2)
-    is_long ? close + spread_adj : close - spread_adj
+// Check if entry is valid (within max distance from SuperTrend)
+is_valid_entry_distance(is_long, open_price, supertrend_val) =>
+    if is_long
+        // For LONG: open should not be more than X pips ABOVE supertrend
+        open_price <= supertrend_val + pips_to_price(i_max_entry_dist)
+    else
+        // For SHORT: open should not be more than X pips BELOW supertrend
+        open_price >= supertrend_val - pips_to_price(i_max_entry_dist)
+
+// Calculate SL using pivot and supertrend midpoint method
+calc_pivot_sl(is_long, pivot_level, supertrend_val) =>
+    if is_long
+        // For LONG: SL between pivot LOW and supertrend
+        // Edge case: if pivot LOW < supertrend, use supertrend
+        if pivot_level < supertrend_val
+            supertrend_val - pips_to_price(i_sl_buffer)
+        else
+            midpoint = (pivot_level + supertrend_val) / 2
+            // Ensure SL is never below supertrend (max SL rule)
+            math.max(midpoint, supertrend_val) - pips_to_price(i_sl_buffer)
+    else
+        // For SHORT: SL between pivot HIGH and supertrend
+        // Edge case: if pivot HIGH > supertrend, use supertrend
+        if pivot_level > supertrend_val
+            supertrend_val + pips_to_price(i_sl_buffer)
+        else
+            midpoint = (pivot_level + supertrend_val) / 2
+            // Ensure SL is never above supertrend (max SL rule)
+            math.min(midpoint, supertrend_val) + pips_to_price(i_sl_buffer)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INDICATOR CALCULATIONS (from original ppst_v1.pine)
@@ -251,16 +274,20 @@ short_entry_time_window = short_circle and minutes_since_signal <= i_entry_windo
 long_entry_nth_circle = long_circle and circle_count_since_signal == i_entry_circle_num and Trend == 1
 short_entry_nth_circle = short_circle and circle_count_since_signal == i_entry_circle_num and Trend == -1
 
-// Final entry decision based on mode
-long_entry = i_entry_mode == "Signal Swing" ? long_entry_signal_swing :
-             i_entry_mode == "Signal + Circle Same Bar" ? long_entry_same_bar :
-             i_entry_mode == "Circle within Time Window" ? long_entry_time_window :
-             i_entry_mode == "Nth Circle" ? long_entry_nth_circle : false
+// Final entry decision based on mode (before distance filter)
+long_entry_mode = i_entry_mode == "Signal Swing" ? long_entry_signal_swing :
+                  i_entry_mode == "Signal + Circle Same Bar" ? long_entry_same_bar :
+                  i_entry_mode == "Circle within Time Window" ? long_entry_time_window :
+                  i_entry_mode == "Nth Circle" ? long_entry_nth_circle : false
 
-short_entry = i_entry_mode == "Signal Swing" ? short_entry_signal_swing :
-              i_entry_mode == "Signal + Circle Same Bar" ? short_entry_same_bar :
-              i_entry_mode == "Circle within Time Window" ? short_entry_time_window :
-              i_entry_mode == "Nth Circle" ? short_entry_nth_circle : false
+short_entry_mode = i_entry_mode == "Signal Swing" ? short_entry_signal_swing :
+                   i_entry_mode == "Signal + Circle Same Bar" ? short_entry_same_bar :
+                   i_entry_mode == "Circle within Time Window" ? short_entry_time_window :
+                   i_entry_mode == "Nth Circle" ? short_entry_nth_circle : false
+
+// Apply entry distance filter (max distance from PP SuperTrend)
+long_entry = long_entry_mode and is_valid_entry_distance(true, open, Trailingsl)
+short_entry = short_entry_mode and is_valid_entry_distance(false, open, Trailingsl)
 
 // Plot entry circles (always show circles regardless of entry mode)
 plotshape(long_circle and showentry and in_date_range, title="Long Entry Circle", style=shape.circle, color=color.green, location=location.belowbar, size=size.small)
@@ -273,31 +300,30 @@ plotshape(short_circle and showentry and in_date_range, title="Short Entry Circl
 // Track position state
 var float entry_price = na
 var float sl_price = na
+var float original_sl = na  // Original SL before trailing
 var float tp_price = na
-var float trail_price = na
 var bool be_triggered = false
+var bool supertrend_trailing = false  // Flag when SuperTrend takes over as trailing stop
 var int position_dir = 0  // 1=long, -1=short, 0=flat
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ENTRY LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Ensure ATR is valid before calculating SL
-atr_value = ta.atr(Pd)
-atr_valid = not na(atr_value)
-
-// Entry conditions - require valid ATR for ATR-based SL
-can_enter_long = long_entry and strategy.position_size == 0 and in_date_range and (i_sl_type != "ATR" or atr_valid)
-can_enter_short = short_entry and strategy.position_size == 0 and in_date_range and (i_sl_type != "ATR" or atr_valid)
+// Entry conditions - require valid support/resistance for SL calculation
+can_enter_long = long_entry and strategy.position_size == 0 and in_date_range and not na(support)
+can_enter_short = short_entry and strategy.position_size == 0 and in_date_range and not na(resistance)
 
 if can_enter_long
-    entry_price := close  // Use actual close price for calculation
+    entry_price := close + pips_to_price(i_spread_pips)  // Spread-adjusted entry
 
-    // Calculate SL distance
-    sl_dist = i_sl_type == "ATR" ? calc_atr_sl() : pips_to_price(i_sl_pips)
-    sl_price := entry_price - sl_dist - pips_to_price(i_sl_buffer)
+    // Calculate SL using pivot LOW and SuperTrend midpoint method
+    // For LONG: SL is between previous pivot LOW and PP SuperTrend
+    sl_price := calc_pivot_sl(true, support, Trailingsl)
+    original_sl := sl_price  // Store original SL for trailing comparison
 
-    // Calculate TP
+    // Calculate TP based on SL distance from adjusted entry
+    sl_dist = entry_price - sl_price
     if i_tp_type == "Risk Ratio"
         tp_price := entry_price + (sl_dist * i_tp_ratio)
     else if i_tp_type == "Fixed Pips"
@@ -305,20 +331,29 @@ if can_enter_long
     else
         tp_price := na
 
-    trail_price := na
+    // Calculate position size
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.max(qty, 1)  // Minimum 1 unit
+
     be_triggered := false
+    supertrend_trailing := false
     position_dir := 1
 
-    strategy.entry("Long", strategy.long, qty=i_units)
+    strategy.entry("Long", strategy.long, qty=qty)
 
 if can_enter_short
-    entry_price := close  // Use actual close price for calculation
+    entry_price := close - pips_to_price(i_spread_pips)  // Spread-adjusted entry
 
-    // Calculate SL distance
-    sl_dist = i_sl_type == "ATR" ? calc_atr_sl() : pips_to_price(i_sl_pips)
-    sl_price := entry_price + sl_dist + pips_to_price(i_sl_buffer)
+    // Calculate SL using pivot HIGH and SuperTrend midpoint method
+    // For SHORT: SL is between previous pivot HIGH and PP SuperTrend
+    sl_price := calc_pivot_sl(false, resistance, Trailingsl)
+    original_sl := sl_price  // Store original SL for trailing comparison
 
-    // Calculate TP
+    // Calculate TP based on SL distance from adjusted entry
+    sl_dist = sl_price - entry_price  // For shorts, SL is above entry
     if i_tp_type == "Risk Ratio"
         tp_price := entry_price - (sl_dist * i_tp_ratio)
     else if i_tp_type == "Fixed Pips"
@@ -326,11 +361,18 @@ if can_enter_short
     else
         tp_price := na
 
-    trail_price := na
+    // Calculate position size
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.max(qty, 1)  // Minimum 1 unit
+
     be_triggered := false
+    supertrend_trailing := false
     position_dir := -1
 
-    strategy.entry("Short", strategy.short, qty=i_units)
+    strategy.entry("Short", strategy.short, qty=qty)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXIT ORDER MANAGEMENT - Run every bar when position is open
@@ -339,16 +381,21 @@ if can_enter_short
 // If SL/TP are NA but position is open, try to calculate them using position avg price
 if strategy.position_size != 0 and na(sl_price)
     actual_entry = strategy.position_avg_price
-    if not na(actual_entry) and not na(atr_value)
-        sl_dist_calc = i_sl_type == "ATR" ? (atr_value * i_sl_atr_mult) : pips_to_price(i_sl_pips)
-        if strategy.position_size > 0
-            sl_price := actual_entry - sl_dist_calc - pips_to_price(i_sl_buffer)
+    if not na(actual_entry)
+        if strategy.position_size > 0 and not na(support) and not na(Trailingsl)
+            // LONG: Use pivot LOW and SuperTrend midpoint method
+            sl_price := calc_pivot_sl(true, support, Trailingsl)
+            original_sl := sl_price
+            sl_dist_calc = actual_entry - sl_price
             if i_tp_type == "Risk Ratio"
                 tp_price := actual_entry + (sl_dist_calc * i_tp_ratio)
             else if i_tp_type == "Fixed Pips"
                 tp_price := actual_entry + pips_to_price(i_tp_pips)
-        else
-            sl_price := actual_entry + sl_dist_calc + pips_to_price(i_sl_buffer)
+        else if strategy.position_size < 0 and not na(resistance) and not na(Trailingsl)
+            // SHORT: Use pivot HIGH and SuperTrend midpoint method
+            sl_price := calc_pivot_sl(false, resistance, Trailingsl)
+            original_sl := sl_price
+            sl_dist_calc = sl_price - actual_entry
             if i_tp_type == "Risk Ratio"
                 tp_price := actual_entry - (sl_dist_calc * i_tp_ratio)
             else if i_tp_type == "Fixed Pips"
@@ -399,41 +446,31 @@ if strategy.position_size != 0 and i_be_enabled and not be_triggered
                 strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ATR-BASED TRAILING STOP LOGIC
+// SUPERTREND TRAILING STOP LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Trailing stop management
-if strategy.position_size != 0 and i_trail_enabled
-    profit_pips = price_to_pips(position_dir == 1 ?
-                                 close - entry_price :
-                                 entry_price - close)
-
-    // Activate trailing only after minimum profit
-    if profit_pips >= i_trail_activation
-        trail_dist = ta.atr(Pd) * i_trail_atr_mult
-
-        if position_dir == 1
-            new_trail = close - trail_dist
-            if na(trail_price) or new_trail > trail_price
-                trail_price := new_trail
-                // Update SL if trail is better
-                if trail_price > sl_price
-                    sl_price := trail_price
-                    if na(tp_price)
-                        strategy.exit("Long Exit", "Long", stop=sl_price)
-                    else
-                        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
-        else
-            new_trail = close + trail_dist
-            if na(trail_price) or new_trail < trail_price
-                trail_price := new_trail
-                // Update SL if trail is better
-                if trail_price < sl_price
-                    sl_price := trail_price
-                    if na(tp_price)
-                        strategy.exit("Short Exit", "Short", stop=sl_price)
-                    else
-                        strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+// When SuperTrend moves better than original SL, use it as trailing stop
+if strategy.position_size != 0 and not na(original_sl) and not na(Trailingsl)
+    if position_dir == 1
+        // LONG: If SuperTrend rises above original SL, use SuperTrend as trailing stop
+        supertrend_sl = Trailingsl - pips_to_price(i_sl_buffer)
+        if supertrend_sl > original_sl and supertrend_sl > sl_price
+            supertrend_trailing := true
+            sl_price := supertrend_sl
+            if na(tp_price)
+                strategy.exit("Long Exit", "Long", stop=sl_price)
+            else
+                strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+    else if position_dir == -1
+        // SHORT: If SuperTrend falls below original SL, use SuperTrend as trailing stop
+        supertrend_sl = Trailingsl + pips_to_price(i_sl_buffer)
+        if supertrend_sl < original_sl and supertrend_sl < sl_price
+            supertrend_trailing := true
+            sl_price := supertrend_sl
+            if na(tp_price)
+                strategy.exit("Short Exit", "Short", stop=sl_price)
+            else
+                strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // POSITION RESET ON EXIT
@@ -443,9 +480,10 @@ if strategy.position_size != 0 and i_trail_enabled
 if strategy.position_size == 0 and position_dir != 0
     entry_price := na
     sl_price := na
+    original_sl := na
     tp_price := na
-    trail_price := na
     be_triggered := false
+    supertrend_trailing := false
     position_dir := 0
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -457,8 +495,9 @@ plot(plot_sim and strategy.position_size != 0 ? sl_price : na,
      "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
 plot(plot_sim and strategy.position_size != 0 ? tp_price : na,
      "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
-plot(plot_sim and strategy.position_size != 0 and not na(trail_price) ? trail_price : na,
-     "Trailing Stop", color=color.orange, style=plot.style_linebr, linewidth=1)
+// Show original SL level when SuperTrend trailing is active (for reference)
+plot(plot_sim and strategy.position_size != 0 and supertrend_trailing ? original_sl : na,
+     "Original SL", color=color.orange, style=plot.style_linebr, linewidth=1)
 plot(plot_sim and strategy.position_size != 0 ? entry_price : na,
      "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1)
 
@@ -466,7 +505,7 @@ plot(plot_sim and strategy.position_size != 0 ? entry_price : na,
 // STATISTICS TABLE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-var table stats_table = table.new(position.top_right, 2, 28, bgcolor=color.new(color.white, 80), border_width=1)
+var table stats_table = table.new(position.top_right, 2, 32, bgcolor=color.new(color.white, 80), border_width=1)
 
 // Track actual first and last bar times on chart
 var int first_bar_time = 0
@@ -554,12 +593,17 @@ if show_stats and barstate.islast
 
     // Strategy Parameters
     table.cell(stats_table, 0, row, "Position Size", text_color=color.black, text_size=size.small)
-    table.cell(stats_table, 1, row, str.tostring(i_units) + " units", text_color=color.black, text_size=size.small)
+    sizing_info = i_sizing_mode == "Compound Risk %" ? str.tostring(i_risk_percent) + "% risk" : str.tostring(i_units) + " units"
+    table.cell(stats_table, 1, row, sizing_info, text_color=color.black, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "SL Type", text_color=color.black, text_size=size.small)
-    sl_info = i_sl_type == "ATR" ? str.tostring(i_sl_atr_mult) + "x ATR" : str.tostring(i_sl_pips) + " pips"
+    sl_info = "Pivot/ST Mid"
     table.cell(stats_table, 1, row, sl_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Max Entry Dist", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(i_max_entry_dist) + " pips", text_color=color.black, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "SL Buffer", text_color=color.black, text_size=size.small)
@@ -571,9 +615,8 @@ if show_stats and barstate.islast
     table.cell(stats_table, 1, row, tp_info, text_color=color.black, text_size=size.small)
     row := row + 1
 
-    table.cell(stats_table, 0, row, "Trail Stop", text_color=color.black, text_size=size.small)
-    trail_info = i_trail_enabled ? str.tostring(i_trail_atr_mult) + "x ATR @" + str.tostring(i_trail_activation) + "p" : "Disabled"
-    table.cell(stats_table, 1, row, trail_info, text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 0, row, "ST Trail", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "Auto (ST > orig SL)", text_color=color.black, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "Break-Even", text_color=color.black, text_size=size.small)
@@ -665,3 +708,11 @@ if show_stats and barstate.islast
 
     table.cell(stats_table, 0, row, "TP Price", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, na(tp_price) ? "NA" : str.tostring(tp_price, "#.#####"), text_color=na(tp_price) ? color.red : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Original SL", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(original_sl) ? "NA" : str.tostring(original_sl, "#.#####"), text_color=na(original_sl) ? color.gray : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "ST Trail", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, supertrend_trailing ? "ACTIVE" : "Inactive", text_color=supertrend_trailing ? color.orange : color.gray, text_size=size.small)
