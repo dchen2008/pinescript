@@ -74,7 +74,7 @@ backtest:
 
 # Live Trading
 live:
-  poll_interval_seconds: 5
+  poll_interval_seconds: 1
   max_candles_buffer: 500
   risk_percent: 1.5
   logs_dir: logs
