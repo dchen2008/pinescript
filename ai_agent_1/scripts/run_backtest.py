@@ -18,12 +18,13 @@ from src.backtest.portfolio import Portfolio
 from src.backtest.report import generate_report
 from src.strategy.ppst_signal import PPSTSignalStrategy
 from src.strategy.ppst_circle import PPSTCircleStrategy
+from src.strategy.vwap_mean_reversion import VWAPMeanReversionStrategy
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run PPST backtest")
     parser.add_argument("--config", default="config/default.yaml", help="Config file path")
-    parser.add_argument("--strategy", choices=["signal", "circle"], default="signal")
+    parser.add_argument("--strategy", choices=["signal", "circle", "vwap"], default="signal")
     parser.add_argument("--instrument", default=None, help="Override instrument")
     parser.add_argument("--granularity", default=None, help="Override timeframe")
     parser.add_argument("--atr-factor", type=float, default=None, help="Override ATR factor")
@@ -74,7 +75,27 @@ def main():
     )
 
     # Strategy
-    if args.strategy == "signal":
+    use_circles = False
+    strategy_type = "ppst"
+    vwap_params = {}
+
+    if args.strategy == "vwap":
+        vwap_cfg = config.get("vwap_strategy", {})
+        strategy = VWAPMeanReversionStrategy(
+            rsi_oversold=vwap_cfg.get("rsi_oversold", 30.0),
+            rsi_overbought=vwap_cfg.get("rsi_overbought", 70.0),
+            sl_pips=vwap_cfg.get("sl_pips", 15.0),
+            tp_type=vwap_cfg.get("tp_type", "vwap"),
+            tp_rr=args.rr_ratio or vwap_cfg.get("tp_rr", 1.5),
+        )
+        strategy_type = "vwap"
+        vwap_params = {
+            "session_start_utc": vwap_cfg.get("session_start_utc", 8),
+            "vwap_band_mult": vwap_cfg.get("vwap_band_mult", 1.5),
+            "rsi_period": vwap_cfg.get("rsi_period", 14),
+        }
+        rr = args.rr_ratio or vwap_cfg.get("tp_rr", 1.5)
+    elif args.strategy == "signal":
         sig_cfg = config["signal_strategy"]
         rr = args.rr_ratio or sig_cfg["rr_ratio"]
         strategy = PPSTSignalStrategy(
@@ -83,7 +104,6 @@ def main():
             trail_with_supertrend=sig_cfg["trail_with_supertrend"],
             only_long=sig_cfg["only_long"],
         )
-        use_circles = False
     else:
         circ_cfg = config["circle_strategy"]
         rr = args.rr_ratio or circ_cfg["tp_ratio"]
@@ -99,8 +119,10 @@ def main():
             be_enabled=circ_cfg["be_enabled"],
             be_trigger_pips=circ_cfg["be_trigger_pips"],
             be_offset_pips=circ_cfg["be_offset_pips"],
+            volume_threshold=circ_cfg.get("volume_threshold", 0.0),
         )
         use_circles = True
+        ppst_params["volume_filter_period"] = circ_cfg.get("volume_filter_period", 20)
 
     # Load data
     print(f"Loading {instrument} {granularity} data...")
@@ -115,13 +137,18 @@ def main():
         time_filter_params=time_filter_params,
         conservative_fills=config["backtest"]["conservative_fills"],
         use_circles=use_circles,
+        strategy_type=strategy_type,
+        vwap_params=vwap_params,
     )
 
     print("Running backtest...")
     result = engine.run(df)
 
     # Generate report
-    label = args.label or f"{args.strategy}_{granularity}_atr{ppst_params['atr_factor']}_rr{rr}"
+    if args.strategy == "vwap":
+        label = args.label or f"vwap_{granularity}_band{vwap_params.get('vwap_band_mult', 1.5)}_rr{rr}"
+    else:
+        label = args.label or f"{args.strategy}_{granularity}_atr{ppst_params['atr_factor']}_rr{rr}"
     report = generate_report(
         result["trade_log"],
         result["equity_curve"],

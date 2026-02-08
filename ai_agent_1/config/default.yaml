@@ -58,6 +58,29 @@ circle_strategy:
   be_trigger_pips: 10.0         # Optimized: tighter BE trigger
   be_offset_pips: 1.0           # Optimized: smaller BE offset
   trail_with_supertrend: true
+  volume_filter_period: 20   # SMA lookback for relative volume
+  volume_threshold: 0.0      # 0 = disabled, 1.5 = require 1.5x avg volume
+
+# VWAP Mean Reversion Strategy
+vwap_strategy:
+  session_start_utc: 8       # London open (08:00 UTC)
+  vwap_band_mult: 1.5        # Std dev multiplier for VWAP bands
+  rsi_period: 14             # RSI lookback period
+  rsi_oversold: 30.0         # RSI threshold for long entries
+  rsi_overbought: 70.0       # RSI threshold for short entries
+  sl_pips: 15.0              # Fixed SL distance in pips
+  tp_type: "vwap"            # "vwap", "opposite_band", or "rr"
+  tp_rr: 1.5                 # RR ratio (used when tp_type=rr)
+
+# VWAP Optimizer Grid
+vwap_optimizer:
+  session_starts: [8, 13]             # London (8) and NY (13) UTC
+  vwap_band_mults: [1.0, 1.5, 2.0]
+  rsi_periods: [7, 14]
+  rsi_thresholds: [[30, 70], [25, 75]]
+  sl_pips: [10, 15, 20]
+  tp_types: ["vwap", "rr"]
+  tp_rrs: [1.0, 1.5, 2.0]
 
 # Optimizer Grid
 optimizer:
