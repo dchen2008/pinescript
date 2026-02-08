@@ -1,0 +1,96 @@
+# PPST Trading Agent Configuration
+# OANDA credentials are in .env (not here)
+
+instrument: EUR_USD
+pip_value: 0.0001  # 1 pip = 0.0001 for EUR/USD (4th decimal)
+
+# Timeframes to download/backtest
+timeframes:
+  - M1
+  - M5
+
+# PPST Indicator
+ppst:
+  pivot_period: 2
+  atr_factor: 4.5    # Optimized: best risk-adjusted at 1.5% risk (7.02% avg weekly, 34.8% max DD)
+  atr_period: 10
+
+# Time Filter (PT timezone)
+time_filter:
+  use_quiet_window: false   # Optimized: no quiet window for best results
+  quiet_start_hour: 13
+  quiet_start_min: 30
+  quiet_end_hour: 16
+  quiet_end_min: 30
+  use_market_window: true
+  market_open_day: 6     # Sunday (Python weekday: 6)
+  market_open_hour: 14
+  market_close_day: 4    # Friday (Python weekday: 4)
+  market_close_hour: 14
+
+# Position Sizing
+sizing:
+  initial_capital: 10000.0
+  risk_percent: 15.0          # Optimized: aggressive compound sizing
+  max_position_units: 10000000  # Raised from 100K to allow proper compound sizing
+
+# Spread
+spread_pips: 1.5
+
+# Signal Strategy (ppst_official_bt) - baseline, not recommended
+signal_strategy:
+  use_rr_tp: true
+  rr_ratio: 1.5
+  trail_with_supertrend: true
+  only_long: false
+
+# Circle Strategy (ppst_v1_bt) - BEST PERFORMING
+circle_strategy:
+  entry_mode: "Nth Circle"      # Optimized: Nth Circle entry mode
+  entry_window_min: 30
+  entry_circle_num: 1
+  max_entry_dist_pips: 20.0     # Optimized: wider entry distance filter
+  sl_buffer_pips: 1.0
+  tp_type: "Risk Ratio"         # Optimized: RR-based TP
+  tp_ratio: 2.0                 # Optimized: 2.0 RR ratio
+  tp_fixed_pips: 30.0
+  be_enabled: true
+  be_trigger_pips: 10.0         # Optimized: tighter BE trigger
+  be_offset_pips: 1.0           # Optimized: smaller BE offset
+  trail_with_supertrend: true
+
+# Optimizer Grid
+optimizer:
+  atr_factors: [3.0, 3.5, 3.75, 4.0, 4.5, 5.0]
+  timeframes: [M1, M5]
+  rr_ratios: [1.0, 1.5, 2.0, 2.5]
+  tp_types: [rr, trailing, none]
+  risk_percents: [1.0, 3.0, 5.0, 10.0, 15.0, 20.0]
+  max_workers: 4
+
+# Backtest
+backtest:
+  conservative_fills: true  # If both SL and TP within candle, assume SL hit
+
+# Live Trading
+live:
+  poll_interval_seconds: 5
+  max_candles_buffer: 500
+  risk_percent: 1.5
+  logs_dir: logs
+
+# Performance Monitor (adaptive risk governor)
+monitor:
+  enabled: true
+  baseline_risk: 1.5        # Normal risk % — never exceeds this
+  min_risk: 0.5             # Floor risk % during DD danger
+  dd_caution_threshold: 0.10  # 10% drawdown -> reduce to 0.75%
+  dd_danger_threshold: 0.20   # 20% drawdown -> reduce to 0.5%
+  gain_protect_threshold: 8.0  # 8%+ week return -> lock in gains at 0.75%
+  gain_protect_risk: 0.75
+
+# Best Configuration Summary (from optimization):
+# Strategy: M1 Nth Circle
+# ATR Factor: 5.0, ATR Period: 10, Pivot Period: 2
+# Risk: 15%, RR Ratio: 2.0, No Quiet Window
+# Results: $10K -> $1,023,228, Avg Weekly: +34.97%, 2352 trades, 52.34% WR, PF: 1.29
