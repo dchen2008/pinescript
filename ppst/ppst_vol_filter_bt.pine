@@ -1,0 +1,395 @@
+// PPST Volume Filter Backtest Strategy
+// Based on PP SuperTrend by LonesomeTheBlue
+// Tests volume filter + quiet hours effectiveness via TV Strategy Tester
+
+//@version=5
+strategy(title="PPST Vol Filter BT", shorttitle="PPST-VF", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=10000,
+         initial_capital=10000, currency=currency.USD,
+         pyramiding=0, process_orders_on_close=true,
+         max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PP SUPERTREND SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+ind_group = "PP SuperTrend"
+prd = input.int(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50, group=ind_group)
+Factor = input.float(defval = 5.0, title = "ATR Factor", minval = 0.1, step = 0.1, group=ind_group)
+Pd = input.int(defval = 10, title = "ATR Period", minval=1, group=ind_group)
+showpivot = input.bool(defval = false, title="Show Pivot Points", group=ind_group)
+showlabel = input.bool(defval = true, title="Show Buy/Sell Labels", group=ind_group)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VOLUME FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+vf_group = "Volume Filter"
+use_vol_filter = input.bool(defval = true, title="Enable Volume Filter", group=vf_group)
+vol_sma_period = input.int(defval = 30, title="Volume SMA Period", minval = 5, maxval = 200, group=vf_group)
+vol_threshold = input.float(defval = 1.0, title="Min Volume Ratio (VF)", minval = 0.1, step = 0.1, group=vf_group,
+     tooltip="Signal candle volume / SMA(volume, N). 1.0 = only trade when volume >= average")
+show_vol_filter = input.bool(defval = true, title="Show Vol Filtered Signals", group=vf_group)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUIET HOURS FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+qh_group = "Quiet Hours"
+use_quiet = input.bool(defval = true, title="Enable Quiet Hours", group=qh_group)
+quiet_start_hour = input.int(defval = 12, title="Start Hour", minval = 0, maxval = 23, group=qh_group)
+quiet_start_min = input.int(defval = 0, title="Start Minute", minval = 0, maxval = 59, group=qh_group)
+quiet_end_hour = input.int(defval = 16, title="End Hour", minval = 0, maxval = 23, group=qh_group)
+quiet_end_min = input.int(defval = 30, title="End Minute", minval = 0, maxval = 59, group=qh_group)
+quiet_tz = input.string(defval = "America/Los_Angeles", title="Timezone", group=qh_group,
+     options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"])
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY SETTINGS
+// ═══════════════════════════════════════════════════════════════════════════════
+strat_group = "Strategy"
+i_sizing_mode = input.string("Compound Risk %", "Sizing Mode", options=["Compound Risk %", "Fixed Units"], group=strat_group)
+i_risk_percent = input.float(1.0, "Risk Per Trade (%)", group=strat_group, minval=0.1, step=0.1)
+i_units = input.int(10000, "Fixed Position Size (Units)", group=strat_group, minval=1000, step=1000)
+i_max_position = input.int(500000, "Max Position Size (Units)", group=strat_group, minval=1000, step=50000,
+     tooltip="Safety cap. 500K ≈ $10K equity at 50:1 OANDA leverage")
+i_spread_pips = input.float(1.5, "Spread (Pips)", group=strat_group, minval=0, step=0.1)
+i_sl_buffer = input.float(3.0, "SL Buffer (Pips)", group=strat_group, minval=0, step=0.5,
+     tooltip="Added below SuperTrend for LONG SL, above for SHORT SL")
+i_tp_type = input.string("None", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=strat_group)
+i_tp_ratio = input.float(1.5, "TP Risk:Reward Ratio", group=strat_group, minval=0.5, step=0.1)
+i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step=1)
+
+// Display
+disp_group = "Display"
+show_stats = input.bool(defval = true, title="Show Statistics Table", group=disp_group)
+plot_sl_tp = input.bool(defval = true, title="Show SL/TP Levels", group=disp_group)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+pip_value() =>
+    syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+pips_to_price(pips) =>
+    pips * pip_value()
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PP SUPERTREND CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+float ph = ta.pivothigh(prd, prd)
+float pl = ta.pivotlow(prd, prd)
+
+plotshape(ph and showpivot, text="H", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.red, location=location.abovebar, offset=-prd)
+plotshape(pl and showpivot, text="L", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.lime, location=location.belowbar, offset=-prd)
+
+var float center = na
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        center := (center * 2 + lastpp) / 3
+
+Up = center - (Factor * ta.atr(Pd))
+Dn = center + (Factor * ta.atr(Pd))
+
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? math.max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? math.min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1 : close < TUp[1] ? -1 : nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+// Plot SuperTrend line
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color=linecolor, linewidth=2, title="PP SuperTrend")
+
+// Raw signals (trend change)
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VOLUME FILTER CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+vol_sma = ta.sma(volume, vol_sma_period)
+vol_ratio = vol_sma > 0 ? volume / vol_sma : 0.0
+is_low_vol = use_vol_filter and vol_ratio < vol_threshold
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUIET HOURS CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+h = hour(time, quiet_tz)
+m = minute(time, quiet_tz)
+current_minutes = h * 60 + m
+quiet_start_minutes = quiet_start_hour * 60 + quiet_start_min
+quiet_end_minutes = quiet_end_hour * 60 + quiet_end_min
+
+is_quiet = false
+if use_quiet
+    if quiet_start_minutes <= quiet_end_minutes
+        // Normal range (e.g. 12:00 - 16:30)
+        is_quiet := current_minutes >= quiet_start_minutes and current_minutes < quiet_end_minutes
+    else
+        // Overnight range (e.g. 22:00 - 06:00)
+        is_quiet := current_minutes >= quiet_start_minutes or current_minutes < quiet_end_minutes
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILTER LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+// Filtered = signal exists but blocked by quiet hours OR low volume
+// When filtered: hold existing position, do nothing
+is_vol_filtered = (bsignal or ssignal) and is_low_vol and not is_quiet
+is_qh_filtered = (bsignal or ssignal) and is_quiet
+is_filtered = is_quiet or is_low_vol
+
+// Actionable signals (passed all filters)
+buy_signal = bsignal and not is_filtered
+sell_signal = ssignal and not is_filtered
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+var float entry_price = na
+var float sl_price = na
+var float tp_price = na
+var int position_dir = 0  // 1=long, -1=short, 0=flat
+
+if buy_signal
+    // Close SHORT if exists, open LONG
+    entry_price := close + pips_to_price(i_spread_pips)
+    sl_price := Trailingsl - pips_to_price(i_sl_buffer)
+    sl_dist = entry_price - sl_price
+
+    if i_tp_type == "Risk Ratio"
+        tp_price := entry_price + (sl_dist * i_tp_ratio)
+    else if i_tp_type == "Fixed Pips"
+        tp_price := entry_price + pips_to_price(i_tp_pips)
+    else
+        tp_price := na
+
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.min(qty, i_max_position)
+        qty := math.max(qty, 1)
+
+    position_dir := 1
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if sell_signal
+    // Close LONG if exists, open SHORT
+    entry_price := close - pips_to_price(i_spread_pips)
+    sl_price := Trailingsl + pips_to_price(i_sl_buffer)
+    sl_dist = sl_price - entry_price
+
+    if i_tp_type == "Risk Ratio"
+        tp_price := entry_price - (sl_dist * i_tp_ratio)
+    else if i_tp_type == "Fixed Pips"
+        tp_price := entry_price - pips_to_price(i_tp_pips)
+    else
+        tp_price := na
+
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.min(qty, i_max_position)
+        qty := math.max(qty, 1)
+
+    position_dir := -1
+    strategy.entry("Short", strategy.short, qty=qty)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SL/TP EXIT ORDERS
+// ═══════════════════════════════════════════════════════════════════════════════
+if strategy.position_size > 0 and not na(sl_price)
+    if na(tp_price)
+        strategy.exit("Long Exit", "Long", stop=sl_price)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+
+if strategy.position_size < 0 and not na(sl_price)
+    if na(tp_price)
+        strategy.exit("Short Exit", "Short", stop=sl_price)
+    else
+        strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+
+// Reset on flat
+if strategy.position_size == 0 and position_dir != 0
+    entry_price := na
+    sl_price := na
+    tp_price := na
+    position_dir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUAL: BACKGROUND COLORS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Quiet hours: light yellow background (continuous zone)
+bgcolor(is_quiet and use_quiet ? color.new(color.yellow, 88) : na, title="Quiet Hours Zone")
+
+// Volume filtered signal: light gray background (single bar flash)
+bgcolor(is_vol_filtered and show_vol_filter ? color.new(color.gray, 80) : na, title="Vol Filtered Signal")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUAL: SIGNAL LABELS
+// ═══════════════════════════════════════════════════════════════════════════════
+// Actionable signals: green BUY / red SELL
+plotshape(buy_signal and showlabel ? Trailingsl : na, title="Buy", text="Buy",
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.lime, textcolor=color.black)
+plotshape(sell_signal and showlabel ? Trailingsl : na, title="Sell", text="Sell",
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.red, textcolor=color.white)
+
+// Filtered signals: gray xB/xS with filter reason
+plotshape(bsignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Buy", text="xB\nQH",
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.new(color.yellow, 30), textcolor=color.black)
+plotshape(ssignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Sell", text="xS\nQH",
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.new(color.yellow, 30), textcolor=color.black)
+plotshape(bsignal and is_vol_filtered and show_vol_filter ? Trailingsl : na, title="Vol Filtered Buy", text="xB\nVol",
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.new(color.gray, 30), textcolor=color.white)
+plotshape(ssignal and is_vol_filtered and show_vol_filter ? Trailingsl : na, title="Vol Filtered Sell", text="xS\nVol",
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.new(color.gray, 30), textcolor=color.white)
+
+// SL/TP levels
+plot(plot_sl_tp and strategy.position_size != 0 ? sl_price : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(plot_sl_tp and strategy.position_size != 0 ? tp_price : na, "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(plot_sl_tp and strategy.position_size != 0 ? entry_price : na, "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATISTICS TABLE
+// ═══════════════════════════════════════════════════════════════════════════════
+var table stats_table = table.new(position.top_right, 2, 25, bgcolor=color.new(color.white, 80), border_width=1)
+
+// Track filter counts
+var int total_signals = 0
+var int vol_filtered_count = 0
+var int qh_filtered_count = 0
+var int traded_count = 0
+
+if bsignal or ssignal
+    total_signals := total_signals + 1
+if is_vol_filtered
+    vol_filtered_count := vol_filtered_count + 1
+if is_qh_filtered
+    qh_filtered_count := qh_filtered_count + 1
+if buy_signal or sell_signal
+    traded_count := traded_count + 1
+
+if show_stats and barstate.islast
+    row = 0
+
+    // Title
+    table.cell(stats_table, 0, row, "PPST Vol Filter", text_color=color.black, text_size=size.normal)
+    table.cell(stats_table, 1, row, "Backtest", text_color=color.black, text_size=size.normal)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
+    row := row + 1
+
+    // Config
+    table.cell(stats_table, 0, row, "PP SuperTrend", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(prd) + ", " + str.tostring(Factor) + ", " + str.tostring(Pd), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Vol Filter", text_color=color.black, text_size=size.small)
+    vf_info = use_vol_filter ? "VF=" + str.tostring(vol_threshold, "#.#") + " SMA" + str.tostring(vol_sma_period) : "OFF"
+    table.cell(stats_table, 1, row, vf_info, text_color=use_vol_filter ? color.blue : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Quiet Hours", text_color=color.black, text_size=size.small)
+    qh_info = use_quiet ? str.tostring(quiet_start_hour, "00") + ":" + str.tostring(quiet_start_min, "00") + "-" + str.tostring(quiet_end_hour, "00") + ":" + str.tostring(quiet_end_min, "00") : "OFF"
+    table.cell(stats_table, 1, row, qh_info, text_color=use_quiet ? color.blue : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Sizing", text_color=color.black, text_size=size.small)
+    sizing_info = i_sizing_mode == "Compound Risk %" ? str.tostring(i_risk_percent) + "% risk" : str.tostring(i_units) + " units"
+    table.cell(stats_table, 1, row, sizing_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "SL Buffer", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(i_sl_buffer) + " pips", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "TP Type", text_color=color.black, text_size=size.small)
+    tp_info = i_tp_type == "Risk Ratio" ? str.tostring(i_tp_ratio) + " R:R" : i_tp_type == "Fixed Pips" ? str.tostring(i_tp_pips) + "p" : "None (swing)"
+    table.cell(stats_table, 1, row, tp_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Spread", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(i_spread_pips) + " pips", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Divider
+    table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
+    row := row + 1
+
+    // Signal stats
+    table.cell(stats_table, 0, row, "Total Signals", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(total_signals), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Vol Filtered", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(vol_filtered_count), text_color=vol_filtered_count > 0 ? color.orange : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "QH Filtered", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(qh_filtered_count), text_color=qh_filtered_count > 0 ? color.orange : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Traded", text_color=color.black, text_size=size.small)
+    filter_pct = total_signals > 0 ? (1.0 - traded_count / total_signals) * 100 : 0
+    table.cell(stats_table, 1, row, str.tostring(traded_count) + " (" + str.tostring(filter_pct, "#.#") + "% filtered)", text_color=color.blue, text_size=size.small)
+    row := row + 1
+
+    // Divider
+    table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
+    row := row + 1
+
+    // Performance from strategy built-ins
+    table.cell(stats_table, 0, row, "Closed Trades", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(strategy.closedtrades), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    win_trades = strategy.wintrades
+    total_closed = strategy.closedtrades
+    win_rate = total_closed > 0 ? (win_trades / total_closed) * 100 : 0
+    table.cell(stats_table, 0, row, "Win Rate", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(win_rate, "#.#") + "%", text_color=win_rate >= 50 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    gross_profit = strategy.grossprofit
+    gross_loss = math.abs(strategy.grossloss)
+    profit_factor = gross_loss > 0 ? gross_profit / gross_loss : gross_profit > 0 ? 999 : 0
+    table.cell(stats_table, 0, row, "Profit Factor", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(profit_factor, "#.##"), text_color=profit_factor >= 1 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Net Profit", text_color=color.black, text_size=size.small)
+    net_profit = strategy.netprofit
+    table.cell(stats_table, 1, row, "$" + str.tostring(net_profit, "#.##"), text_color=net_profit >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Max Drawdown", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "$" + str.tostring(strategy.max_drawdown, "#.##"), text_color=color.red, text_size=size.small)
+    row := row + 1
+
+    // Current vol ratio (for reference)
+    table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Cur Vol Ratio", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(vol_ratio, "#.##"), text_color=vol_ratio >= vol_threshold ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Position", text_color=color.black, text_size=size.small)
+    pos_info = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    table.cell(stats_table, 1, row, pos_info, text_color=strategy.position_size != 0 ? color.blue : color.gray, text_size=size.small)
