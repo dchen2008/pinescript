@@ -150,6 +150,7 @@ sell_signal = ssignal and not is_filtered
 // ═══════════════════════════════════════════════════════════════════════════════
 var float entry_price = na
 var float sl_price = na
+var float original_sl = na
 var float tp_price = na
 var int position_dir = 0  // 1=long, -1=short, 0=flat
 
@@ -157,6 +158,7 @@ if buy_signal
     // Close SHORT if exists, open LONG
     entry_price := close + pips_to_price(i_spread_pips)
     sl_price := Trailingsl - pips_to_price(i_sl_buffer)
+    original_sl := sl_price
     sl_dist = entry_price - sl_price
 
     if i_tp_type == "Risk Ratio"
@@ -180,6 +182,7 @@ if sell_signal
     // Close LONG if exists, open SHORT
     entry_price := close - pips_to_price(i_spread_pips)
     sl_price := Trailingsl + pips_to_price(i_sl_buffer)
+    original_sl := sl_price
     sl_dist = sl_price - entry_price
 
     if i_tp_type == "Risk Ratio"
@@ -200,6 +203,21 @@ if sell_signal
     strategy.entry("Short", strategy.short, qty=qty)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// SUPERTREND TRAILING STOP
+// ═══════════════════════════════════════════════════════════════════════════════
+// Trail SL with SuperTrend: use TUp for longs, TDown for shorts
+// CRITICAL: use TUp/TDown directly, NOT Trailingsl (which flips with trend)
+if strategy.position_size != 0 and not na(original_sl)
+    if position_dir == 1 and not na(TUp)
+        trailing_sl = TUp - pips_to_price(i_sl_buffer)
+        if trailing_sl > original_sl and trailing_sl > sl_price
+            sl_price := trailing_sl
+    else if position_dir == -1 and not na(TDown)
+        trailing_sl = TDown + pips_to_price(i_sl_buffer)
+        if trailing_sl < original_sl and trailing_sl < sl_price
+            sl_price := trailing_sl
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SL/TP EXIT ORDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 if strategy.position_size > 0 and not na(sl_price)
@@ -218,6 +236,7 @@ if strategy.position_size < 0 and not na(sl_price)
 if strategy.position_size == 0 and position_dir != 0
     entry_price := na
     sl_price := na
+    original_sl := na
     tp_price := na
     position_dir := 0
 
