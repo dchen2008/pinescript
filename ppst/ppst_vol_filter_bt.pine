@@ -155,7 +155,10 @@ var float tp_price = na
 var int position_dir = 0  // 1=long, -1=short, 0=flat
 
 if buy_signal
-    // Close SHORT if exists, open LONG
+    // Close same-direction position first for re-entry with fresh SL
+    // (happens after filtered SELL: LONG held → next BUY must close+reopen)
+    if strategy.position_size > 0
+        strategy.close("Long", comment="Re-entry")
     entry_price := close + pips_to_price(i_spread_pips)
     sl_price := Trailingsl - pips_to_price(i_sl_buffer)
     original_sl := sl_price
@@ -179,7 +182,9 @@ if buy_signal
     strategy.entry("Long", strategy.long, qty=qty)
 
 if sell_signal
-    // Close LONG if exists, open SHORT
+    // Close same-direction position first for re-entry with fresh SL
+    if strategy.position_size < 0
+        strategy.close("Short", comment="Re-entry")
     entry_price := close - pips_to_price(i_spread_pips)
     sl_price := Trailingsl + pips_to_price(i_sl_buffer)
     original_sl := sl_price
