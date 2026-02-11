@@ -7,7 +7,7 @@ strategy(title="PPST Vol Filter BT", shorttitle="PPST-VF", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=10000,
          initial_capital=10000, currency=currency.USD,
          pyramiding=0, process_orders_on_close=true,
-         max_bars_back=5000)
+         max_bars_back=5000, max_labels_count=500)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PP SUPERTREND SETTINGS
@@ -327,6 +327,20 @@ if strategy.position_size == 0 and position_dir != 0
     original_sl := na
     tp_price := na
     position_dir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P&L LABELS ON TRADE CLOSE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Use [1] comparison — more reliable than var counter with process_orders_on_close
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    trade_idx = strategy.closedtrades - 1
+    pnl = strategy.closedtrades.profit(trade_idx)
+    pnl_text = pnl >= 0 ? "$" + str.tostring(pnl, "#.##") : "-$" + str.tostring(math.abs(pnl), "#.##")
+    pnl_color = pnl >= 0 ? color.green : color.red
+    label.new(bar_index, na, pnl_text,
+         style=label.style_none,
+         textcolor=pnl_color, size=size.small,
+         yloc=pnl >= 0 ? yloc.abovebar : yloc.belowbar)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VISUAL: BACKGROUND COLORS
