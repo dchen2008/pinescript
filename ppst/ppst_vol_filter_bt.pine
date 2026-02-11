@@ -13,54 +13,57 @@ strategy(title="PPST Vol Filter BT", shorttitle="PPST-VF", overlay=true,
 // PP SUPERTREND SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
 ind_group = "PP SuperTrend"
-prd = input.int(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50, group=ind_group)
-Factor = input.float(defval = 5.0, title = "ATR Factor", minval = 0.1, step = 0.1, group=ind_group)
-Pd = input.int(defval = 10, title = "ATR Period", minval=1, group=ind_group)
-showpivot = input.bool(defval = false, title="Show Pivot Points", group=ind_group)
-showlabel = input.bool(defval = true, title="Show Buy/Sell Labels", group=ind_group)
+prd = input.int(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50, group=ind_group, display=display.status_line)
+Factor = input.float(defval = 5.0, title = "ATR Factor", minval = 0.1, step = 0.1, group=ind_group, display=display.status_line)
+Pd = input.int(defval = 10, title = "ATR Period", minval=1, group=ind_group, display=display.status_line)
+// Note: status line shows "PPST-VF {prd} {Factor} {Pd} {sma} {vf}" — PineScript doesn't support custom formatting
+showpivot = input.bool(defval = false, title="Show Pivot Points", group=ind_group, display=display.none)
+showlabel = input.bool(defval = true, title="Show Buy/Sell Labels", group=ind_group, display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VOLUME FILTER
 // ═══════════════════════════════════════════════════════════════════════════════
 vf_group = "Volume Filter"
-use_vol_filter = input.bool(defval = true, title="Enable Volume Filter", group=vf_group)
-vol_sma_period = input.int(defval = 30, title="Volume SMA Period", minval = 5, maxval = 200, group=vf_group)
+use_vol_filter = input.bool(defval = true, title="Enable Volume Filter", group=vf_group, display=display.none)
+vol_sma_period = input.int(defval = 30, title="Volume SMA Period", minval = 5, maxval = 200, group=vf_group, display=display.status_line)
 vol_threshold = input.float(defval = 1.0, title="Min Volume Ratio (VF)", minval = 0.1, step = 0.1, group=vf_group,
-     tooltip="Signal candle volume / SMA(volume, N). 1.0 = only trade when volume >= average")
-show_vol_filter = input.bool(defval = true, title="Show Vol Filtered Signals", group=vf_group)
+     tooltip="Signal candle volume / SMA(volume, N). 1.0 = only trade when volume >= average", display=display.status_line)
+vol_recovery_bars = input.int(defval = 0, title="Vol Recovery Bars", minval = 0, maxval = 20, group=vf_group,
+     tooltip="After vol-filtered signal, wait up to N bars for volume to recover. 0 = disabled (no recovery).", display=display.none)
+show_vol_filter = input.bool(defval = true, title="Show Vol Filtered Signals", group=vf_group, display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // QUIET HOURS FILTER
 // ═══════════════════════════════════════════════════════════════════════════════
 qh_group = "Quiet Hours"
-use_quiet = input.bool(defval = true, title="Enable Quiet Hours", group=qh_group)
-quiet_start_hour = input.int(defval = 12, title="Start Hour", minval = 0, maxval = 23, group=qh_group)
-quiet_start_min = input.int(defval = 0, title="Start Minute", minval = 0, maxval = 59, group=qh_group)
-quiet_end_hour = input.int(defval = 16, title="End Hour", minval = 0, maxval = 23, group=qh_group)
-quiet_end_min = input.int(defval = 30, title="End Minute", minval = 0, maxval = 59, group=qh_group)
+use_quiet = input.bool(defval = true, title="Enable Quiet Hours", group=qh_group, display=display.none)
+quiet_start_hour = input.int(defval = 12, title="Start Hour", minval = 0, maxval = 23, group=qh_group, display=display.none)
+quiet_start_min = input.int(defval = 0, title="Start Minute", minval = 0, maxval = 59, group=qh_group, display=display.none)
+quiet_end_hour = input.int(defval = 16, title="End Hour", minval = 0, maxval = 23, group=qh_group, display=display.none)
+quiet_end_min = input.int(defval = 30, title="End Minute", minval = 0, maxval = 59, group=qh_group, display=display.none)
 quiet_tz = input.string(defval = "America/Los_Angeles", title="Timezone", group=qh_group,
-     options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"])
+     options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"], display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STRATEGY SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
 strat_group = "Strategy"
-i_sizing_mode = input.string("Compound Risk %", "Sizing Mode", options=["Compound Risk %", "Fixed Units"], group=strat_group)
-i_risk_percent = input.float(1.0, "Risk Per Trade (%)", group=strat_group, minval=0.1, step=0.1)
-i_units = input.int(10000, "Fixed Position Size (Units)", group=strat_group, minval=1000, step=1000)
+i_sizing_mode = input.string("Compound Risk %", "Sizing Mode", options=["Compound Risk %", "Fixed Units"], group=strat_group, display=display.none)
+i_risk_percent = input.float(1.0, "Risk Per Trade (%)", group=strat_group, minval=0.1, step=0.1, display=display.none)
+i_units = input.int(10000, "Fixed Position Size (Units)", group=strat_group, minval=1000, step=1000, display=display.none)
 i_max_position = input.int(500000, "Max Position Size (Units)", group=strat_group, minval=1000, step=50000,
-     tooltip="Safety cap. 500K ≈ $10K equity at 50:1 OANDA leverage")
-i_spread_pips = input.float(1.5, "Spread (Pips)", group=strat_group, minval=0, step=0.1)
+     tooltip="Safety cap. 500K ≈ $10K equity at 50:1 OANDA leverage", display=display.none)
+i_spread_pips = input.float(1.5, "Spread (Pips)", group=strat_group, minval=0, step=0.1, display=display.none)
 i_sl_buffer = input.float(3.0, "SL Buffer (Pips)", group=strat_group, minval=0, step=0.5,
-     tooltip="Added below SuperTrend for LONG SL, above for SHORT SL")
-i_tp_type = input.string("None", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=strat_group)
-i_tp_ratio = input.float(1.5, "TP Risk:Reward Ratio", group=strat_group, minval=0.5, step=0.1)
-i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step=1)
+     tooltip="Added below SuperTrend for LONG SL, above for SHORT SL", display=display.none)
+i_tp_type = input.string("None", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=strat_group, display=display.none)
+i_tp_ratio = input.float(1.5, "TP Risk:Reward Ratio", group=strat_group, minval=0.5, step=0.1, display=display.none)
+i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step=1, display=display.none)
 
 // Display
 disp_group = "Display"
-show_stats = input.bool(defval = true, title="Show Statistics Table", group=disp_group)
-plot_sl_tp = input.bool(defval = true, title="Show SL/TP Levels", group=disp_group)
+show_stats = input.bool(defval = true, title="Show Statistics Table", group=disp_group, display=display.none)
+plot_sl_tp = input.bool(defval = true, title="Show SL/TP Levels", group=disp_group, display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
@@ -141,9 +144,47 @@ is_vol_filtered = (bsignal or ssignal) and is_low_vol and not is_quiet
 is_qh_filtered = (bsignal or ssignal) and is_quiet
 is_filtered = is_quiet or is_low_vol
 
-// Actionable signals (passed all filters)
-buy_signal = bsignal and not is_filtered
-sell_signal = ssignal and not is_filtered
+// ── Volume Recovery (deferred entry) ──
+// When signal is vol-filtered, wait up to N bars for volume to recover
+var int deferred_dir = 0      // 1=deferred buy, -1=deferred sell, 0=none
+var int deferred_age = 0      // bars since signal was deferred
+
+// New vol-filtered signal → start deferral
+if bsignal and is_vol_filtered
+    deferred_dir := 1
+    deferred_age := 0
+if ssignal and is_vol_filtered
+    deferred_dir := -1
+    deferred_age := 0
+
+// Any new raw signal (even filtered) resets opposite deferral
+if bsignal and deferred_dir == -1
+    deferred_dir := 0
+if ssignal and deferred_dir == 1
+    deferred_dir := 0
+
+// Age the deferral each bar (only when no new signal this bar)
+if deferred_dir != 0 and not bsignal and not ssignal
+    deferred_age := deferred_age + 1
+
+// Expire if too old or trend reversed
+if deferred_dir == 1 and (Trend != 1 or deferred_age > vol_recovery_bars)
+    deferred_dir := 0
+if deferred_dir == -1 and (Trend != -1 or deferred_age > vol_recovery_bars)
+    deferred_dir := 0
+
+// Volume recovered? Enter the deferred trade (skip if in quiet hours)
+vol_recovered = not is_low_vol and not is_quiet
+deferred_buy = deferred_dir == 1 and vol_recovered and deferred_age > 0 and vol_recovery_bars > 0
+deferred_sell = deferred_dir == -1 and vol_recovered and deferred_age > 0 and vol_recovery_bars > 0
+
+// Clear deferral after execution
+if deferred_buy or deferred_sell
+    deferred_dir := 0
+
+// Actionable signals (passed all filters OR volume recovered)
+buy_signal = (bsignal and not is_filtered) or deferred_buy
+sell_signal = (ssignal and not is_filtered) or deferred_sell
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // POSITION MANAGEMENT
@@ -269,12 +310,20 @@ plotshape(bsignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, titl
 plotshape(ssignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Sell", text="xS\nQH",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.yellow, 30), textcolor=color.black)
-plotshape(bsignal and is_vol_filtered and show_vol_filter ? Trailingsl : na, title="Vol Filtered Buy", text="xB\nVol",
+// Vol filtered (still blocked — no recovery yet or recovery disabled)
+plotshape(bsignal and is_vol_filtered and not deferred_buy and show_vol_filter ? Trailingsl : na, title="Vol Filtered Buy", text="xB\nVol",
      location=location.absolute, style=shape.labelup, size=size.tiny,
      color=color.new(color.gray, 30), textcolor=color.white)
-plotshape(ssignal and is_vol_filtered and show_vol_filter ? Trailingsl : na, title="Vol Filtered Sell", text="xS\nVol",
+plotshape(ssignal and is_vol_filtered and not deferred_sell and show_vol_filter ? Trailingsl : na, title="Vol Filtered Sell", text="xS\nVol",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.gray, 30), textcolor=color.white)
+// Volume recovered (deferred entry executed)
+plotshape(deferred_buy and showlabel ? Trailingsl : na, title="Vol Recovery Buy", text="Buy\nVR",
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.new(color.lime, 30), textcolor=color.black)
+plotshape(deferred_sell and showlabel ? Trailingsl : na, title="Vol Recovery Sell", text="Sell\nVR",
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.new(color.red, 30), textcolor=color.white)
 
 // SL/TP levels
 plot(plot_sl_tp and strategy.position_size != 0 ? sl_price : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
@@ -289,6 +338,7 @@ var table stats_table = table.new(position.top_right, 2, 25, bgcolor=color.new(c
 // Track filter counts
 var int total_signals = 0
 var int vol_filtered_count = 0
+var int vol_recovered_count = 0
 var int qh_filtered_count = 0
 var int traded_count = 0
 
@@ -296,6 +346,8 @@ if bsignal or ssignal
     total_signals := total_signals + 1
 if is_vol_filtered
     vol_filtered_count := vol_filtered_count + 1
+if deferred_buy or deferred_sell
+    vol_recovered_count := vol_recovered_count + 1
 if is_qh_filtered
     qh_filtered_count := qh_filtered_count + 1
 if buy_signal or sell_signal
@@ -319,7 +371,7 @@ if show_stats and barstate.islast
     row := row + 1
 
     table.cell(stats_table, 0, row, "Vol Filter", text_color=color.black, text_size=size.small)
-    vf_info = use_vol_filter ? "VF=" + str.tostring(vol_threshold, "#.#") + " SMA" + str.tostring(vol_sma_period) : "OFF"
+    vf_info = use_vol_filter ? "VF=" + str.tostring(vol_threshold, "#.#") + " SMA" + str.tostring(vol_sma_period) + (vol_recovery_bars > 0 ? " VR:" + str.tostring(vol_recovery_bars) : "") : "OFF"
     table.cell(stats_table, 1, row, vf_info, text_color=use_vol_filter ? color.blue : color.gray, text_size=size.small)
     row := row + 1
 
@@ -358,6 +410,10 @@ if show_stats and barstate.islast
 
     table.cell(stats_table, 0, row, "Vol Filtered", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, str.tostring(vol_filtered_count), text_color=vol_filtered_count > 0 ? color.orange : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Vol Recovered", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(vol_recovered_count), text_color=vol_recovered_count > 0 ? color.green : color.gray, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "QH Filtered", text_color=color.black, text_size=size.small)
