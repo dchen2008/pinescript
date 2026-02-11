@@ -348,6 +348,22 @@ if strategy.closedtrades > nz(strategy.closedtrades[1])
          textcolor=pnl_color, size=size.small,
          yloc=was_short ? yloc.abovebar : yloc.belowbar)
 
+// Unrealized P&L for open position on last bar
+var label open_pnl_label = na
+if barstate.islast and strategy.opentrades > 0
+    open_size = strategy.opentrades.size(0)
+    open_entry = strategy.opentrades.entry_price(0)
+    open_pnl = (close - open_entry) * open_size
+    open_text = (open_pnl >= 0 ? "$" + str.tostring(open_pnl, "#.##") : "-$" + str.tostring(math.abs(open_pnl), "#.##")) + "*"
+    open_color = open_pnl >= 0 ? color.green : color.red
+    open_is_short = open_size < 0
+    if not na(open_pnl_label)
+        label.delete(open_pnl_label)
+    open_pnl_label := label.new(bar_index, na, open_text,
+         style=label.style_none,
+         textcolor=open_color, size=size.small,
+         yloc=open_is_short ? yloc.abovebar : yloc.belowbar)
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // VISUAL: BACKGROUND COLORS
 // ═══════════════════════════════════════════════════════════════════════════════
