@@ -334,13 +334,19 @@ if strategy.position_size == 0 and position_dir != 0
 // Use [1] comparison — more reliable than var counter with process_orders_on_close
 if strategy.closedtrades > nz(strategy.closedtrades[1])
     trade_idx = strategy.closedtrades - 1
-    pnl = strategy.closedtrades.profit(trade_idx)
+    // Manual P&L calc — strategy.closedtrades.profit() has forex conversion error
+    trade_size = strategy.closedtrades.size(trade_idx)
+    entry_p = strategy.closedtrades.entry_price(trade_idx)
+    exit_p = strategy.closedtrades.exit_price(trade_idx)
+    pnl = (exit_p - entry_p) * trade_size
+    was_short = trade_size < 0
     pnl_text = pnl >= 0 ? "$" + str.tostring(pnl, "#.##") : "-$" + str.tostring(math.abs(pnl), "#.##")
     pnl_color = pnl >= 0 ? color.green : color.red
+    // SHORT exit → P&L above (BUY signal is below), LONG exit → P&L below (SELL signal is above)
     label.new(bar_index, na, pnl_text,
          style=label.style_none,
          textcolor=pnl_color, size=size.small,
-         yloc=pnl >= 0 ? yloc.abovebar : yloc.belowbar)
+         yloc=was_short ? yloc.abovebar : yloc.belowbar)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VISUAL: BACKGROUND COLORS
