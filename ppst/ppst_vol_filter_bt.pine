@@ -39,7 +39,7 @@ qh_group = "Quiet Hours"
 use_quiet = input.bool(defval = true, title="Enable Quiet Hours", group=qh_group, display=display.none)
 quiet_start_hour = input.int(defval = 12, title="Start Hour", minval = 0, maxval = 23, group=qh_group, display=display.none)
 quiet_start_min = input.int(defval = 0, title="Start Minute", minval = 0, maxval = 59, group=qh_group, display=display.none)
-quiet_end_hour = input.int(defval = 16, title="End Hour", minval = 0, maxval = 23, group=qh_group, display=display.none)
+quiet_end_hour = input.int(defval = 14, title="End Hour", minval = 0, maxval = 23, group=qh_group, display=display.none)
 quiet_end_min = input.int(defval = 30, title="End Minute", minval = 0, maxval = 59, group=qh_group, display=display.none)
 quiet_tz = input.string(defval = "America/Los_Angeles", title="Timezone", group=qh_group,
      options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"], display=display.none)
@@ -62,8 +62,8 @@ i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step
 
 // Display
 disp_group = "Display"
-show_stats = input.bool(defval = true, title="Show Statistics Table", group=disp_group, display=display.none)
-plot_sl_tp = input.bool(defval = true, title="Show SL/TP Levels", group=disp_group, display=display.none)
+show_stats = input.bool(defval = false, title="Show Statistics Table", group=disp_group, display=display.none)
+plot_sl_tp = input.bool(defval = false, title="Show SL/TP Levels", group=disp_group, display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER FUNCTIONS
