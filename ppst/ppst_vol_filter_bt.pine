@@ -30,6 +30,8 @@ vol_threshold = input.float(defval = 1.0, title="Min Volume Ratio (VF)", minval 
      tooltip="Signal candle volume / SMA(volume, N). 1.0 = only trade when volume >= average", display=display.status_line)
 vol_recovery_bars = input.int(defval = 0, title="Vol Recovery Bars", minval = 0, maxval = 20, group=vf_group,
      tooltip="After vol-filtered signal, wait up to N bars for volume to recover. 0 = disabled (no recovery).", display=display.none)
+filtered_exit_bars = input.int(defval = 0, title="Filtered Exit Bars", minval = 0, maxval = 10, group=vf_group,
+     tooltip="When signal is vol-filtered with opposite position open: 0 = keep until SL hit (frozen SL), 1-10 = close after N bars.", display=display.none)
 show_vol_filter = input.bool(defval = true, title="Show Vol Filtered Signals", group=vf_group, display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -182,6 +184,31 @@ deferred_sell = deferred_dir == -1 and vol_recovered and deferred_age > 0 and vo
 if deferred_buy or deferred_sell
     deferred_dir := 0
 
+// ── Filtered Exit (delayed close of opposite position) ──
+// When vol-filtered signal occurs with opposite position open, close after N bars
+var int filtered_exit_countdown = 0   // bars remaining until forced close
+var int filtered_exit_dir = 0         // 1=close SHORT (buy was filtered), -1=close LONG (sell was filtered)
+
+// New vol-filtered signal with opposite position → start countdown
+if bsignal and is_vol_filtered and strategy.position_size < 0 and filtered_exit_bars > 0
+    filtered_exit_countdown := filtered_exit_bars
+    filtered_exit_dir := 1
+if ssignal and is_vol_filtered and strategy.position_size > 0 and filtered_exit_bars > 0
+    filtered_exit_countdown := filtered_exit_bars
+    filtered_exit_dir := -1
+
+// Any actionable signal cancels the countdown (position will reverse normally)
+if (bsignal and not is_filtered) or (ssignal and not is_filtered) or deferred_buy or deferred_sell
+    filtered_exit_countdown := 0
+    filtered_exit_dir := 0
+
+// Count down and close when expired
+filtered_exit_now = false
+if filtered_exit_countdown > 0
+    filtered_exit_countdown := filtered_exit_countdown - 1
+    if filtered_exit_countdown == 0
+        filtered_exit_now := true
+
 // Actionable signals (passed all filters OR volume recovered)
 buy_signal = (bsignal and not is_filtered) or deferred_buy
 sell_signal = (ssignal and not is_filtered) or deferred_sell
@@ -194,6 +221,24 @@ var float sl_price = na
 var float original_sl = na
 var float tp_price = na
 var int position_dir = 0  // 1=long, -1=short, 0=flat
+
+// Filtered exit: close opposite position after countdown
+if filtered_exit_now
+    if filtered_exit_dir == 1 and strategy.position_size < 0
+        strategy.close("Short", comment="Filtered Exit")
+        entry_price := na
+        sl_price := na
+        original_sl := na
+        tp_price := na
+        position_dir := 0
+    if filtered_exit_dir == -1 and strategy.position_size > 0
+        strategy.close("Long", comment="Filtered Exit")
+        entry_price := na
+        sl_price := na
+        original_sl := na
+        tp_price := na
+        position_dir := 0
+    filtered_exit_dir := 0
 
 if buy_signal and strategy.position_size <= 0
     // Enter LONG from flat or reverse from SHORT
@@ -325,6 +370,14 @@ plotshape(deferred_sell and showlabel ? Trailingsl : na, title="Vol Recovery Sel
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.red, 30), textcolor=color.white)
 
+// Filtered exit (delayed close after countdown)
+plotshape(filtered_exit_now and filtered_exit_dir == 1 and show_vol_filter, title="Filtered Exit Short", text="FX",
+     location=location.abovebar, style=shape.xcross, size=size.tiny,
+     color=color.orange, textcolor=color.orange)
+plotshape(filtered_exit_now and filtered_exit_dir == -1 and show_vol_filter, title="Filtered Exit Long", text="FX",
+     location=location.belowbar, style=shape.xcross, size=size.tiny,
+     color=color.orange, textcolor=color.orange)
+
 // SL/TP levels
 plot(plot_sl_tp and strategy.position_size != 0 ? sl_price : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
 plot(plot_sl_tp and strategy.position_size != 0 ? tp_price : na, "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
@@ -339,6 +392,7 @@ var table stats_table = table.new(position.top_right, 2, 25, bgcolor=color.new(c
 var int total_signals = 0
 var int vol_filtered_count = 0
 var int vol_recovered_count = 0
+var int filtered_exit_count = 0
 var int qh_filtered_count = 0
 var int traded_count = 0
 
@@ -348,6 +402,8 @@ if is_vol_filtered
     vol_filtered_count := vol_filtered_count + 1
 if deferred_buy or deferred_sell
     vol_recovered_count := vol_recovered_count + 1
+if filtered_exit_now
+    filtered_exit_count := filtered_exit_count + 1
 if is_qh_filtered
     qh_filtered_count := qh_filtered_count + 1
 if buy_signal or sell_signal
@@ -414,6 +470,11 @@ if show_stats and barstate.islast
 
     table.cell(stats_table, 0, row, "Vol Recovered", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, str.tostring(vol_recovered_count), text_color=vol_recovered_count > 0 ? color.green : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Filtered Exits", text_color=color.black, text_size=size.small)
+    fe_info = filtered_exit_bars > 0 ? str.tostring(filtered_exit_count) + " (" + str.tostring(filtered_exit_bars) + "bar)" : "OFF"
+    table.cell(stats_table, 1, row, fe_info, text_color=filtered_exit_count > 0 ? color.orange : color.gray, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "QH Filtered", text_color=color.black, text_size=size.small)
