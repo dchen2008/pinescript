@@ -82,8 +82,8 @@ pips_to_price(pips) =>
 float ph = ta.pivothigh(prd, prd)
 float pl = ta.pivotlow(prd, prd)
 
-plotshape(ph and showpivot, text="H", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.red, location=location.abovebar, offset=-prd)
-plotshape(pl and showpivot, text="L", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.lime, location=location.belowbar, offset=-prd)
+plotshape(ph and showpivot, text="H", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.red, location=location.abovebar, offset=-prd, display=display.pane)
+plotshape(pl and showpivot, text="L", style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.lime, location=location.belowbar, offset=-prd, display=display.pane)
 
 var float center = na
 float lastpp = ph ? ph : pl ? pl : na
@@ -106,7 +106,7 @@ Trailingsl = Trend == 1 ? TUp : TDown
 
 // Plot SuperTrend line
 linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
-plot(Trailingsl, color=linecolor, linewidth=2, title="PP SuperTrend")
+plot(Trailingsl, color=linecolor, linewidth=2, title="PP SuperTrend", display=display.pane)
 
 // Raw signals (trend change)
 bsignal = Trend == 1 and Trend[1] == -1
@@ -379,45 +379,45 @@ bgcolor(is_vol_filtered and show_vol_filter ? color.new(color.gray, 80) : na, ti
 // Actionable signals: green BUY / red SELL
 plotshape(buy_signal and showlabel ? Trailingsl : na, title="Buy", text="Buy",
      location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.lime, textcolor=color.black)
+     color=color.lime, textcolor=color.black, display=display.pane)
 plotshape(sell_signal and showlabel ? Trailingsl : na, title="Sell", text="Sell",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.red, textcolor=color.white)
+     color=color.red, textcolor=color.white, display=display.pane)
 
 // Filtered signals: gray xB/xS with filter reason
 plotshape(bsignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Buy", text="xB\nQH",
      location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.new(color.yellow, 30), textcolor=color.black)
+     color=color.new(color.yellow, 30), textcolor=color.black, display=display.pane)
 plotshape(ssignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Sell", text="xS\nQH",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.new(color.yellow, 30), textcolor=color.black)
+     color=color.new(color.yellow, 30), textcolor=color.black, display=display.pane)
 // Vol filtered (still blocked — no recovery yet or recovery disabled)
 plotshape(bsignal and is_vol_filtered and not deferred_buy and show_vol_filter ? Trailingsl : na, title="Vol Filtered Buy", text="xB\nVol",
      location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.new(color.gray, 30), textcolor=color.white)
+     color=color.new(color.gray, 30), textcolor=color.white, display=display.pane)
 plotshape(ssignal and is_vol_filtered and not deferred_sell and show_vol_filter ? Trailingsl : na, title="Vol Filtered Sell", text="xS\nVol",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.new(color.gray, 30), textcolor=color.white)
+     color=color.new(color.gray, 30), textcolor=color.white, display=display.pane)
 // Volume recovered (deferred entry executed)
 plotshape(deferred_buy and showlabel ? Trailingsl : na, title="Vol Recovery Buy", text="Buy\nVR",
      location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.new(color.lime, 30), textcolor=color.black)
+     color=color.new(color.lime, 30), textcolor=color.black, display=display.pane)
 plotshape(deferred_sell and showlabel ? Trailingsl : na, title="Vol Recovery Sell", text="Sell\nVR",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.new(color.red, 30), textcolor=color.white)
+     color=color.new(color.red, 30), textcolor=color.white, display=display.pane)
 
 // Filtered exit (delayed close after countdown)
 plotshape(filtered_exit_now and filtered_exit_dir == 1 and show_vol_filter, title="Filtered Exit Short", text="FX",
      location=location.abovebar, style=shape.xcross, size=size.tiny,
-     color=color.orange, textcolor=color.orange)
+     color=color.orange, textcolor=color.orange, display=display.pane)
 plotshape(filtered_exit_now and filtered_exit_dir == -1 and show_vol_filter, title="Filtered Exit Long", text="FX",
      location=location.belowbar, style=shape.xcross, size=size.tiny,
-     color=color.orange, textcolor=color.orange)
+     color=color.orange, textcolor=color.orange, display=display.pane)
 
 // SL/TP levels
-plot(plot_sl_tp and strategy.position_size != 0 ? sl_price : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
-plot(plot_sl_tp and strategy.position_size != 0 ? tp_price : na, "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
-plot(plot_sl_tp and strategy.position_size != 0 ? entry_price : na, "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1)
+plot(plot_sl_tp and strategy.position_size != 0 ? sl_price : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2, display=display.pane)
+plot(plot_sl_tp and strategy.position_size != 0 ? tp_price : na, "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2, display=display.pane)
+plot(plot_sl_tp and strategy.position_size != 0 ? entry_price : na, "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1, display=display.pane)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // STATISTICS TABLE
