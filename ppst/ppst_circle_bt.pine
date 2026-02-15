@@ -1,0 +1,750 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue (original indicator), modified for backtesting
+
+//@version=5
+strategy(title="PPST Circle Strategy", shorttitle="PPST-CIRCLE", overlay=true,
+         default_qty_type=strategy.fixed, default_qty_value=10000,
+         initial_capital=10000, currency=currency.USD,
+         pyramiding=0, process_orders_on_close=true,
+         max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INDICATOR PARAMETERS
+// ═══════════════════════════════════════════════════════════════════════════════
+ind_group = "Indicator Settings"
+prd = input.int(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50, group=ind_group)
+Factor = input.float(defval = 4.5, title = "ATR Factor", minval = 1, step = 0.1, group=ind_group)
+Pd = input.int(defval = 10, title = "ATR Period", minval=1, group=ind_group)
+showpivot = input.bool(defval = false, title="Show Pivot Points", group=ind_group)
+showlabel = input.bool(defval = true, title="Show Buy/Sell Labels", group=ind_group)
+showcl = input.bool(defval = false, title="Show PP Center Line", group=ind_group)
+showsr = input.bool(defval = false, title="Show Support/Resistance", group=ind_group)
+showentry = input.bool(defval = true, title="Show Entry Circles", group=ind_group)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKTEST TIME FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+time_group = "Backtest Time Filter"
+use_time_filter = input.bool(defval = true, title="Use Time Filter", group=time_group)
+bt_start_time = input.time(defval = timestamp("2025-02-01 00:00"), title="Backtest Start Time", group=time_group)
+bt_end_time = input.time(defval = timestamp("2026-02-28 23:59"), title="Backtest End Time", group=time_group)
+
+// Fix timezone bug: compare using timestamp directly but with proper timezone handling
+start_ts = timestamp(syminfo.timezone, year(bt_start_time), month(bt_start_time), dayofmonth(bt_start_time), 0, 0)
+end_ts = timestamp(syminfo.timezone, year(bt_end_time), month(bt_end_time), dayofmonth(bt_end_time), 23, 59)
+
+// Check if current bar is within backtest time range
+in_date_range = use_time_filter ? (time >= start_ts and time <= end_ts) : true
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OANDA ORDER SIMULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+sim_group = "Order Simulation"
+
+// Entry Mode Selection
+// 0 = Signal Swing only
+// 1 = Signal Swing + Circle on same bar
+// 2 = Circle within X minutes from signal
+// 3 = Nth Circle after signal
+i_entry_mode = input.string("Nth Circle", "Entry Mode", options=["Signal Swing", "Signal + Circle Same Bar", "Circle within Time Window", "Nth Circle"], group=sim_group)
+i_entry_window_min = input.int(30, "Entry Time Window (minutes)", group=sim_group, minval=5, step=5)
+i_entry_circle_num = input.int(1, "Circle Number for Entry", group=sim_group, minval=1, maxval=10)
+
+// Position Sizing
+i_sizing_mode = input.string("Compound Risk %", "Sizing Mode", options=["Compound Risk %", "Fixed Units"], group=sim_group)
+i_risk_percent = input.float(1.5, "Risk Per Trade (%)", group=sim_group, minval=0.1, step=0.1)
+i_units = input.int(10000, "Fixed Position Size (Units)", group=sim_group, minval=1000, step=1000)
+i_max_position = input.int(2000000, "Max Position Size (Units)", group=sim_group, minval=1000, step=100000, tooltip="Cap for compound sizing. 2M ≈ $40K equity at 50:1 OANDA leverage.")
+
+// Spread Simulation
+i_spread_pips = input.float(1.5, "Spread (Pips)", group=sim_group, minval=0, step=0.1)
+
+// Entry Distance Filter
+i_max_entry_dist = input.float(20.0, "Max Entry Distance from SuperTrend (Pips)", group=sim_group, minval=1, step=0.5)
+
+// Stop Loss - uses Pivot HIGH/LOW and SuperTrend midpoint method
+i_sl_buffer = input.float(1.0, "SL Buffer (Pips)", group=sim_group, minval=0, step=0.5)
+
+// Take Profit
+i_tp_type = input.string("Risk Ratio", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=sim_group)
+i_tp_ratio = input.float(2.0, "TP Risk:Reward Ratio", group=sim_group, minval=0.5, step=0.1)
+i_tp_pips = input.float(30.0, "TP Fixed Pips", group=sim_group, minval=5, step=1)
+
+// Break-Even
+i_be_enabled = input.bool(true, "Enable Break-Even", group=sim_group)
+i_be_trigger = input.float(10.0, "BE Trigger (Pips in Profit)", group=sim_group, minval=5, step=1)
+i_be_offset = input.float(1.0, "BE Offset (Pips Above Entry)", group=sim_group, minval=0, step=0.5)
+
+// Visual Options
+plot_sim = input.bool(true, "Show SL/TP Levels", group=sim_group)
+show_stats = input.bool(defval = true, title="Show Statistics Table", group=sim_group)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Pip value calculation (handles different instruments)
+pip_value() =>
+    syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+pips_to_price(pips) =>
+    pips * pip_value()
+
+price_to_pips(price_diff) =>
+    price_diff / pip_value()
+
+// Calculate distance from PP SuperTrend in pips
+dist_from_supertrend(price, supertrend_val) =>
+    price_to_pips(math.abs(price - supertrend_val))
+
+// Check if entry is valid (within max distance from SuperTrend)
+is_valid_entry_distance(is_long, open_price, supertrend_val) =>
+    if is_long
+        // For LONG: open should not be more than X pips ABOVE supertrend
+        open_price <= supertrend_val + pips_to_price(i_max_entry_dist)
+    else
+        // For SHORT: open should not be more than X pips BELOW supertrend
+        open_price >= supertrend_val - pips_to_price(i_max_entry_dist)
+
+// Calculate SL using pivot and supertrend midpoint method
+calc_pivot_sl(is_long, pivot_level, supertrend_val) =>
+    if is_long
+        // For LONG: SL between pivot LOW and supertrend
+        // Edge case: if pivot LOW < supertrend, use supertrend
+        if pivot_level < supertrend_val
+            supertrend_val - pips_to_price(i_sl_buffer)
+        else
+            midpoint = (pivot_level + supertrend_val) / 2
+            // Ensure SL is never below supertrend (max SL rule)
+            math.max(midpoint, supertrend_val) - pips_to_price(i_sl_buffer)
+    else
+        // For SHORT: SL between pivot HIGH and supertrend
+        // Edge case: if pivot HIGH > supertrend, use supertrend
+        if pivot_level > supertrend_val
+            supertrend_val + pips_to_price(i_sl_buffer)
+        else
+            midpoint = (pivot_level + supertrend_val) / 2
+            // Ensure SL is never above supertrend (max SL rule)
+            math.min(midpoint, supertrend_val) + pips_to_price(i_sl_buffer)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INDICATOR CALCULATIONS (from original ppst_v1.pine)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// get Pivot High/Low
+float ph = ta.pivothigh(prd, prd)
+float pl = ta.pivotlow(prd, prd)
+
+// drawl Pivot Points if "showpivot" is enabled
+plotshape(ph and showpivot, text="H",  style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.red, location=location.abovebar, offset = -prd)
+plotshape(pl and showpivot, text="L",  style=shape.labeldown, color=color.new(color.white, 100), textcolor=color.lime, location=location.belowbar, offset = -prd)
+
+// calculate the Center line using pivot points
+var float center = na
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        //weighted calculation
+        center := (center * 2 + lastpp) / 3
+
+// upper/lower bands calculation
+Up = center - (Factor * ta.atr(Pd))
+Dn = center + (Factor * ta.atr(Pd))
+
+// get the trend
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? math.max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? math.min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1: close < TUp[1]? -1: nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+// plot the trend
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color = linecolor,  linewidth = 2, title = "PP SuperTrend")
+
+plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
+
+// check and plot the signals
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+// Show signal labels
+plotshape(bsignal and showlabel and in_date_range ? Trailingsl : na, title="Buy", text="Buy", location = location.absolute, style = shape.labelup, size = size.tiny, color = color.lime, textcolor = color.black)
+plotshape(ssignal and showlabel and in_date_range ? Trailingsl : na, title="Sell", text="Sell", location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.red, textcolor = color.white)
+// Gray out signals outside backtest range
+plotshape(bsignal and showlabel and not in_date_range ? Trailingsl : na, title="Buy (out of range)", text="B", location = location.absolute, style = shape.labelup, size = size.tiny, color = color.new(color.gray, 50), textcolor = color.white)
+plotshape(ssignal and showlabel and not in_date_range ? Trailingsl : na, title="Sell (out of range)", text="S", location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.new(color.gray, 50), textcolor = color.white)
+
+//get S/R levels using Pivot Points
+float resistance = na
+float support = na
+support := pl ? pl : support[1]
+resistance := ph ? ph : resistance[1]
+
+// if enabled then show S/R levels
+plot(showsr and support ? support : na, color = showsr and support ? color.lime : na, style = plot.style_circles, offset = -prd)
+plot(showsr and resistance ? resistance : na, color = showsr and resistance ? color.red : na, style = plot.style_circles, offset = -prd)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY CIRCLE MARKERS (Entry Conditions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Calculate candle body midpoint for 50% rule
+float body_top = math.max(open, close)
+float body_bottom = math.min(open, close)
+float body_mid = (body_top + body_bottom) / 2
+
+// Track if we have a valid PH/PL AFTER the signal (not old historical ones)
+var bool has_ph_after_signal = false
+var bool has_pl_after_signal = false
+
+// Track the resistance/support level that forms AFTER the signal
+var float entry_resistance = na
+var float entry_support = na
+
+// Track signal timing and circle count for entry modes
+var int last_signal_bar = 0
+var int last_signal_time = 0
+var int circle_count_since_signal = 0
+
+// Reset on new signals
+if bsignal
+    has_ph_after_signal := false // Need new PH after this signal
+    entry_resistance := na       // Reset entry resistance
+    last_signal_bar := bar_index
+    last_signal_time := time
+    circle_count_since_signal := 0
+if ssignal
+    has_pl_after_signal := false // Need new PL after this signal
+    entry_support := na          // Reset entry support
+    last_signal_bar := bar_index
+    last_signal_time := time
+    circle_count_since_signal := 0
+
+// Detect new PH after BUY signal - update entry_resistance
+if Trend == 1 and ph
+    has_ph_after_signal := true
+    entry_resistance := ph
+
+// Detect new PL after SELL signal - update entry_support
+if Trend == -1 and pl
+    has_pl_after_signal := true
+    entry_support := pl
+
+// LONG Entry Circle: On signal candle use original resistance, after signal use entry_resistance
+// Condition 1: open < resistance AND close > resistance (candle crosses PH from below)
+// Condition 2: body_mid > resistance (50%+ of body above PH)
+// Condition 3: close > center (close above Center Line)
+long_circle_on_signal = bsignal and not na(resistance) and open < resistance and close > resistance and body_mid > resistance and close > center
+long_circle_after_signal = Trend == 1 and not bsignal and has_ph_after_signal and not na(entry_resistance) and open < entry_resistance and close > entry_resistance and body_mid > entry_resistance and close > center
+long_circle = long_circle_on_signal or long_circle_after_signal
+
+// SHORT Entry Circle: On signal candle use original support, after signal use entry_support
+// Condition 1: open > support AND close < support (candle crosses PL from above)
+// Condition 2: body_mid < support (50%+ of body below PL)
+// Condition 3: close < center (close below Center Line)
+short_circle_on_signal = ssignal and not na(support) and open > support and close < support and body_mid < support and close < center
+short_circle_after_signal = Trend == -1 and not ssignal and has_pl_after_signal and not na(entry_support) and open > entry_support and close < entry_support and body_mid < entry_support and close < center
+short_circle = short_circle_on_signal or short_circle_after_signal
+
+// Count circles since last signal
+if long_circle or short_circle
+    circle_count_since_signal := circle_count_since_signal + 1
+
+// Calculate time since last signal (in minutes)
+minutes_since_signal = (time - last_signal_time) / 60000
+
+// Determine entry based on selected mode
+// Mode: Signal Swing - enter on any signal swing
+long_entry_signal_swing = bsignal
+short_entry_signal_swing = ssignal
+
+// Mode: Signal + Circle Same Bar - signal and circle on same bar
+long_entry_same_bar = bsignal and long_circle
+short_entry_same_bar = ssignal and short_circle
+
+// Mode: Circle within Time Window - circle within X minutes of signal
+long_entry_time_window = long_circle and minutes_since_signal <= i_entry_window_min and Trend == 1
+short_entry_time_window = short_circle and minutes_since_signal <= i_entry_window_min and Trend == -1
+
+// Mode: Nth Circle - enter on specific circle number
+long_entry_nth_circle = long_circle and circle_count_since_signal == i_entry_circle_num and Trend == 1
+short_entry_nth_circle = short_circle and circle_count_since_signal == i_entry_circle_num and Trend == -1
+
+// Final entry decision based on mode (before distance filter)
+long_entry_mode = i_entry_mode == "Signal Swing" ? long_entry_signal_swing :
+                  i_entry_mode == "Signal + Circle Same Bar" ? long_entry_same_bar :
+                  i_entry_mode == "Circle within Time Window" ? long_entry_time_window :
+                  i_entry_mode == "Nth Circle" ? long_entry_nth_circle : false
+
+short_entry_mode = i_entry_mode == "Signal Swing" ? short_entry_signal_swing :
+                   i_entry_mode == "Signal + Circle Same Bar" ? short_entry_same_bar :
+                   i_entry_mode == "Circle within Time Window" ? short_entry_time_window :
+                   i_entry_mode == "Nth Circle" ? short_entry_nth_circle : false
+
+// Apply entry distance filter (max distance from PP SuperTrend)
+long_entry = long_entry_mode and is_valid_entry_distance(true, open, Trailingsl)
+short_entry = short_entry_mode and is_valid_entry_distance(false, open, Trailingsl)
+
+// Plot entry circles (always show circles regardless of entry mode)
+plotshape(long_circle and showentry and in_date_range, title="Long Entry Circle", style=shape.circle, color=color.green, location=location.belowbar, size=size.small)
+plotshape(short_circle and showentry and in_date_range, title="Short Entry Circle", style=shape.circle, color=color.red, location=location.abovebar, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT VARIABLES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Track position state
+var float entry_price = na
+var float sl_price = na
+var float original_sl = na  // Original SL before trailing
+var float tp_price = na
+var bool be_triggered = false
+var bool supertrend_trailing = false  // Flag when SuperTrend takes over as trailing stop
+var int position_dir = 0  // 1=long, -1=short, 0=flat
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Entry conditions - require valid support/resistance for SL calculation
+can_enter_long = long_entry and strategy.position_size == 0 and in_date_range and not na(support)
+can_enter_short = short_entry and strategy.position_size == 0 and in_date_range and not na(resistance)
+
+if can_enter_long
+    entry_price := close + pips_to_price(i_spread_pips)  // Spread-adjusted entry
+
+    // Calculate SL using pivot LOW and SuperTrend midpoint method
+    // For LONG: SL is between previous pivot LOW and PP SuperTrend
+    sl_price := calc_pivot_sl(true, support, Trailingsl)
+    original_sl := sl_price  // Store original SL for trailing comparison
+
+    // Calculate TP based on SL distance from adjusted entry
+    sl_dist = entry_price - sl_price
+    if i_tp_type == "Risk Ratio"
+        tp_price := entry_price + (sl_dist * i_tp_ratio)
+    else if i_tp_type == "Fixed Pips"
+        tp_price := entry_price + pips_to_price(i_tp_pips)
+    else
+        tp_price := na
+
+    // Calculate position size
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.min(qty, i_max_position)
+        qty := math.max(qty, 1)  // Minimum 1 unit
+
+    be_triggered := false
+    supertrend_trailing := false
+    position_dir := 1
+
+    strategy.entry("Long", strategy.long, qty=qty)
+
+if can_enter_short
+    entry_price := close - pips_to_price(i_spread_pips)  // Spread-adjusted entry
+
+    // Calculate SL using pivot HIGH and SuperTrend midpoint method
+    // For SHORT: SL is between previous pivot HIGH and PP SuperTrend
+    sl_price := calc_pivot_sl(false, resistance, Trailingsl)
+    original_sl := sl_price  // Store original SL for trailing comparison
+
+    // Calculate TP based on SL distance from adjusted entry
+    sl_dist = sl_price - entry_price  // For shorts, SL is above entry
+    if i_tp_type == "Risk Ratio"
+        tp_price := entry_price - (sl_dist * i_tp_ratio)
+    else if i_tp_type == "Fixed Pips"
+        tp_price := entry_price - pips_to_price(i_tp_pips)
+    else
+        tp_price := na
+
+    // Calculate position size
+    float qty = i_units
+    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+        risk_amount = strategy.equity * i_risk_percent / 100
+        qty := math.floor(risk_amount / sl_dist)
+        qty := math.min(qty, i_max_position)
+        qty := math.max(qty, 1)  // Minimum 1 unit
+
+    be_triggered := false
+    supertrend_trailing := false
+    position_dir := -1
+
+    strategy.entry("Short", strategy.short, qty=qty)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLOSE ON OPPOSITE SIGNAL (Trend Reversal Exit)
+// ═══════════════════════════════════════════════════════════════════════════════
+// When SuperTrend trend flips against an open position, close immediately.
+// This matches the Python agent's behavior where trailing_sl flips to the
+// opposite band on trend reversal, forcing an aggressive exit.
+if strategy.position_size > 0 and ssignal and in_date_range
+    strategy.close("Long", comment="Trend Rev")
+    entry_price := na
+    sl_price := na
+    original_sl := na
+    tp_price := na
+    be_triggered := false
+    supertrend_trailing := false
+    position_dir := 0
+
+if strategy.position_size < 0 and bsignal and in_date_range
+    strategy.close("Short", comment="Trend Rev")
+    entry_price := na
+    sl_price := na
+    original_sl := na
+    tp_price := na
+    be_triggered := false
+    supertrend_trailing := false
+    position_dir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXIT ORDER MANAGEMENT - Run every bar when position is open
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// If SL/TP are NA but position is open, try to calculate them using position avg price
+// Use TUp for longs, TDown for shorts (not Trailingsl which flips with trend)
+if strategy.position_size != 0 and na(sl_price)
+    actual_entry = strategy.position_avg_price
+    if not na(actual_entry)
+        if strategy.position_size > 0 and not na(support) and not na(TUp)
+            // LONG: Use pivot LOW and TUp (lower band) midpoint method
+            sl_price := calc_pivot_sl(true, support, TUp)
+            original_sl := sl_price
+            sl_dist_calc = actual_entry - sl_price
+            if i_tp_type == "Risk Ratio"
+                tp_price := actual_entry + (sl_dist_calc * i_tp_ratio)
+            else if i_tp_type == "Fixed Pips"
+                tp_price := actual_entry + pips_to_price(i_tp_pips)
+        else if strategy.position_size < 0 and not na(resistance) and not na(TDown)
+            // SHORT: Use pivot HIGH and TDown (upper band) midpoint method
+            sl_price := calc_pivot_sl(false, resistance, TDown)
+            original_sl := sl_price
+            sl_dist_calc = sl_price - actual_entry
+            if i_tp_type == "Risk Ratio"
+                tp_price := actual_entry - (sl_dist_calc * i_tp_ratio)
+            else if i_tp_type == "Fixed Pips"
+                tp_price := actual_entry - pips_to_price(i_tp_pips)
+        entry_price := actual_entry
+
+// Always set exit orders when position is open (ensures exits are active)
+if strategy.position_size > 0 and not na(sl_price)
+    if na(tp_price)
+        strategy.exit("Long Exit", "Long", stop=sl_price)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+
+if strategy.position_size < 0 and not na(sl_price)
+    if na(tp_price)
+        strategy.exit("Short Exit", "Short", stop=sl_price)
+    else
+        strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BREAK-EVEN LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Check break-even trigger
+if strategy.position_size != 0 and i_be_enabled and not be_triggered
+    profit_pips = price_to_pips(position_dir == 1 ?
+                                 close - entry_price :
+                                 entry_price - close)
+
+    if profit_pips >= i_be_trigger
+        be_triggered := true
+        be_price = entry_price + (position_dir * pips_to_price(i_be_offset))
+
+        // Update SL to break-even level
+        if position_dir == 1
+            sl_price := math.max(sl_price, be_price)
+            // Re-apply exit with new SL
+            if na(tp_price)
+                strategy.exit("Long Exit", "Long", stop=sl_price)
+            else
+                strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+        else
+            sl_price := math.min(sl_price, be_price)
+            // Re-apply exit with new SL
+            if na(tp_price)
+                strategy.exit("Short Exit", "Short", stop=sl_price)
+            else
+                strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPERTREND TRAILING STOP LOGIC
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// When SuperTrend moves better than original SL, use it as trailing stop
+// CRITICAL: Use TUp for longs, TDown for shorts — NOT Trailingsl which flips with trend!
+// If trend flips while in position, Trailingsl would use the WRONG band and cause immediate stop-out.
+if strategy.position_size != 0 and not na(original_sl)
+    if position_dir == 1 and not na(TUp)
+        // LONG: Use TUp (lower band) as trailing stop — always correct regardless of trend direction
+        supertrend_sl = TUp - pips_to_price(i_sl_buffer)
+        if supertrend_sl > original_sl and supertrend_sl > sl_price
+            supertrend_trailing := true
+            sl_price := supertrend_sl
+            if na(tp_price)
+                strategy.exit("Long Exit", "Long", stop=sl_price)
+            else
+                strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
+    else if position_dir == -1 and not na(TDown)
+        // SHORT: Use TDown (upper band) as trailing stop — always correct regardless of trend direction
+        supertrend_sl = TDown + pips_to_price(i_sl_buffer)
+        if supertrend_sl < original_sl and supertrend_sl < sl_price
+            supertrend_trailing := true
+            sl_price := supertrend_sl
+            if na(tp_price)
+                strategy.exit("Short Exit", "Short", stop=sl_price)
+            else
+                strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POSITION RESET ON EXIT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Reset variables when position closes
+if strategy.position_size == 0 and position_dir != 0
+    entry_price := na
+    sl_price := na
+    original_sl := na
+    tp_price := na
+    be_triggered := false
+    supertrend_trailing := false
+    position_dir := 0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUAL ENHANCEMENTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Plot entry, SL, TP, and trailing stop levels
+plot(plot_sim and strategy.position_size != 0 ? sl_price : na,
+     "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(plot_sim and strategy.position_size != 0 ? tp_price : na,
+     "Take Profit", color=color.green, style=plot.style_linebr, linewidth=2)
+// Show original SL level when SuperTrend trailing is active (for reference)
+plot(plot_sim and strategy.position_size != 0 and supertrend_trailing ? original_sl : na,
+     "Original SL", color=color.orange, style=plot.style_linebr, linewidth=1)
+plot(plot_sim and strategy.position_size != 0 ? entry_price : na,
+     "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATISTICS TABLE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var table stats_table = table.new(position.top_right, 2, 32, bgcolor=color.new(color.white, 80), border_width=1)
+
+// Track actual first and last bar times on chart
+var int first_bar_time = 0
+var int last_bar_time = 0
+var int bars_in_range = 0
+var int total_bars = 0
+
+if barstate.isfirst
+    first_bar_time := time
+last_bar_time := time
+total_bars := total_bars + 1
+if in_date_range
+    bars_in_range := bars_in_range + 1
+
+// Count signals, circles, entries, and blocked entries for stats
+var int total_buy_signals = 0
+var int total_sell_signals = 0
+var int total_long_circles = 0
+var int total_short_circles = 0
+var int total_long_entries = 0
+var int total_short_entries = 0
+var int blocked_by_position = 0
+
+if bsignal and in_date_range
+    total_buy_signals := total_buy_signals + 1
+if ssignal and in_date_range
+    total_sell_signals := total_sell_signals + 1
+if long_circle and in_date_range
+    total_long_circles := total_long_circles + 1
+if short_circle and in_date_range
+    total_short_circles := total_short_circles + 1
+if can_enter_long
+    total_long_entries := total_long_entries + 1
+if can_enter_short
+    total_short_entries := total_short_entries + 1
+
+// Count entries blocked because position already open
+if long_entry and strategy.position_size != 0 and in_date_range
+    blocked_by_position := blocked_by_position + 1
+if short_entry and strategy.position_size != 0 and in_date_range
+    blocked_by_position := blocked_by_position + 1
+
+if show_stats and barstate.islast
+    // Row counter for dynamic positioning
+    row = 0
+
+    // Time range header
+    if use_time_filter
+        filter_start_str = str.tostring(year(bt_start_time)) + "-" + str.tostring(month(bt_start_time), "00") + "-" + str.tostring(dayofmonth(bt_start_time), "00")
+        filter_end_str = str.tostring(year(bt_end_time)) + "-" + str.tostring(month(bt_end_time), "00") + "-" + str.tostring(dayofmonth(bt_end_time), "00")
+        table.cell(stats_table, 0, row, filter_start_str, text_color=color.black, text_size=size.small)
+        table.cell(stats_table, 1, row, filter_end_str, text_color=color.black, text_size=size.small)
+    else
+        chart_start_str = str.tostring(year(first_bar_time)) + "-" + str.tostring(month(first_bar_time), "00") + "-" + str.tostring(dayofmonth(first_bar_time), "00")
+        chart_end_str = str.tostring(year(last_bar_time)) + "-" + str.tostring(month(last_bar_time), "00") + "-" + str.tostring(dayofmonth(last_bar_time), "00")
+        table.cell(stats_table, 0, row, chart_start_str, text_color=color.black, text_size=size.small)
+        table.cell(stats_table, 1, row, chart_end_str, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Filter status and bars
+    filter_status = use_time_filter ? "Filter: ON" : "Filter: OFF"
+    table.cell(stats_table, 0, row, filter_status, text_color=use_time_filter ? color.red : color.green, text_size=size.small)
+    bars_info = use_time_filter ? str.tostring(bars_in_range) + "/" + str.tostring(total_bars) : str.tostring(total_bars) + " bars"
+    table.cell(stats_table, 1, row, bars_info, text_color=color.blue, text_size=size.small)
+    row := row + 1
+
+    // Title
+    table.cell(stats_table, 0, row, "PPST-V1-BT", text_color=color.black, text_size=size.normal)
+    table.cell(stats_table, 1, row, "Strategy", text_color=color.black, text_size=size.normal)
+    row := row + 1
+
+    // Divider
+    table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Entry Mode
+    table.cell(stats_table, 0, row, "Entry Mode", text_color=color.black, text_size=size.small)
+    entry_mode_info = i_entry_mode == "Signal Swing" ? "Signal Swing" :
+                      i_entry_mode == "Signal + Circle Same Bar" ? "Sig+Circle" :
+                      i_entry_mode == "Circle within Time Window" ? "Circle <" + str.tostring(i_entry_window_min) + "m" :
+                      i_entry_mode == "Nth Circle" ? "Circle #" + str.tostring(i_entry_circle_num) : "Unknown"
+    table.cell(stats_table, 1, row, entry_mode_info, text_color=color.blue, text_size=size.small)
+    row := row + 1
+
+    // Strategy Parameters
+    table.cell(stats_table, 0, row, "Position Size", text_color=color.black, text_size=size.small)
+    sizing_info = i_sizing_mode == "Compound Risk %" ? str.tostring(i_risk_percent) + "% risk" : str.tostring(i_units) + " units"
+    table.cell(stats_table, 1, row, sizing_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "SL Type", text_color=color.black, text_size=size.small)
+    sl_info = "Pivot/ST Mid"
+    table.cell(stats_table, 1, row, sl_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Max Entry Dist", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(i_max_entry_dist) + " pips", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "SL Buffer", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(i_sl_buffer) + " pips", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "TP Type", text_color=color.black, text_size=size.small)
+    tp_info = i_tp_type == "Risk Ratio" ? str.tostring(i_tp_ratio) + " R:R" : i_tp_type == "Fixed Pips" ? str.tostring(i_tp_pips) + " pips" : "None"
+    table.cell(stats_table, 1, row, tp_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "ST Trail", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "Auto (ST > orig SL)", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Break-Even", text_color=color.black, text_size=size.small)
+    be_info = i_be_enabled ? "@" + str.tostring(i_be_trigger) + "p +" + str.tostring(i_be_offset) + "p" : "Disabled"
+    table.cell(stats_table, 1, row, be_info, text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Divider
+    table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Signal counts
+    table.cell(stats_table, 0, row, "Signals", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "B:" + str.tostring(total_buy_signals) + " S:" + str.tostring(total_sell_signals), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Circle counts
+    table.cell(stats_table, 0, row, "Circles", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "L:" + str.tostring(total_long_circles) + " S:" + str.tostring(total_short_circles), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Entry counts (orders placed)
+    table.cell(stats_table, 0, row, "Orders", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "L:" + str.tostring(total_long_entries) + " S:" + str.tostring(total_short_entries), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Blocked entries (position already open)
+    table.cell(stats_table, 0, row, "Blocked", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(blocked_by_position) + " (pos open)", text_color=blocked_by_position > 0 ? color.orange : color.gray, text_size=size.small)
+    row := row + 1
+
+    // Divider
+    table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Trading Performance (from strategy built-in)
+    table.cell(stats_table, 0, row, "Total Trades", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(strategy.closedtrades), text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    // Win Rate
+    win_trades = strategy.wintrades
+    total_closed = strategy.closedtrades
+    win_rate = total_closed > 0 ? (win_trades / total_closed) * 100 : 0
+    table.cell(stats_table, 0, row, "Win Rate", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(win_rate, "#.#") + "%", text_color=win_rate >= 50 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    // Profit Factor
+    gross_profit = strategy.grossprofit
+    gross_loss = math.abs(strategy.grossloss)
+    profit_factor = gross_loss > 0 ? gross_profit / gross_loss : gross_profit > 0 ? 999 : 0
+    table.cell(stats_table, 0, row, "Profit Factor", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(profit_factor, "#.##"), text_color=profit_factor >= 1 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    // Net Profit
+    table.cell(stats_table, 0, row, "Net Profit", text_color=color.black, text_size=size.small)
+    net_profit = strategy.netprofit
+    table.cell(stats_table, 1, row, str.tostring(net_profit, "#.##"), text_color=net_profit >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    // Max Drawdown
+    table.cell(stats_table, 0, row, "Max Drawdown", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(strategy.max_drawdown, "#.##"), text_color=color.red, text_size=size.small)
+    row := row + 1
+
+    // Debug: Current position info
+    table.cell(stats_table, 0, row, "─────────", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Position", text_color=color.black, text_size=size.small)
+    pos_info = strategy.position_size > 0 ? "LONG " + str.tostring(strategy.position_size) :
+               strategy.position_size < 0 ? "SHORT " + str.tostring(math.abs(strategy.position_size)) : "FLAT"
+    table.cell(stats_table, 1, row, pos_info, text_color=strategy.position_size != 0 ? color.blue : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Open P/L", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(strategy.openprofit, "#.##"), text_color=strategy.openprofit >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
+
+    // Show SL/TP prices for debugging
+    table.cell(stats_table, 0, row, "SL Price", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(sl_price) ? "NA" : str.tostring(sl_price, "#.#####"), text_color=na(sl_price) ? color.red : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "TP Price", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(tp_price) ? "NA" : str.tostring(tp_price, "#.#####"), text_color=na(tp_price) ? color.red : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Original SL", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, na(original_sl) ? "NA" : str.tostring(original_sl, "#.#####"), text_color=na(original_sl) ? color.gray : color.black, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "ST Trail", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, supertrend_trailing ? "ACTIVE" : "Inactive", text_color=supertrend_trailing ? color.orange : color.gray, text_size=size.small)

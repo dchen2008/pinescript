@@ -2,7 +2,7 @@
 // © LonesomeTheBlue
 
 //@version=4
-study("PPST-V1-BT", overlay=true, format=format.price, scale=scale.right)
+study("PPST-V1-Circle", overlay=true, format=format.price, scale=scale.right)
 prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
 Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
 Pd=input(defval = 10, title = "ATR Period", minval=1)

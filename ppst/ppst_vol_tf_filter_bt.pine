@@ -3,7 +3,7 @@
 // Tests volume filter + quiet hours effectiveness via TV Strategy Tester
 
 //@version=5
-strategy(title="PPST Vol Filter BT", shorttitle="PPST-VF", overlay=true,
+strategy(title="PPST Vol TF BT", shorttitle="PPST-VF-TF", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=10000,
          initial_capital=10000, currency=currency.USD,
          pyramiding=0, process_orders_on_close=true,
@@ -47,6 +47,21 @@ quiet_tz = input.string(defval = "America/Los_Angeles", title="Timezone", group=
      options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"], display=display.none)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY TIME WINDOW
+// ═══════════════════════════════════════════════════════════════════════════════
+etw_group = "Entry Time Window"
+use_entry_window = input.bool(defval = false, title="Enable Entry Window", group=etw_group, display=display.none,
+     tooltip="Whitelist: only allow entries during this time window. Exits (SL/TP/trailing) fire at any time.")
+etw_start_hour = input.int(defval = 16, title="Start Hour", minval = 0, maxval = 23, group=etw_group, display=display.none)
+etw_start_min = input.int(defval = 0, title="Start Minute", minval = 0, maxval = 59, group=etw_group, display=display.none)
+etw_end_hour = input.int(defval = 16, title="End Hour", minval = 0, maxval = 23, group=etw_group, display=display.none)
+etw_end_min = input.int(defval = 30, title="End Minute", minval = 0, maxval = 59, group=etw_group, display=display.none)
+etw_tz = input.string(defval = "America/Los_Angeles", title="Timezone", group=etw_group,
+     options=["America/Los_Angeles", "America/New_York", "America/Chicago", "Europe/London", "UTC"], display=display.none)
+etw_vol_sma_period = input.int(defval = 30, title="Vol Ratio SMA Period", minval = 5, maxval = 200, group=etw_group,
+     tooltip="SMA period for the volume ratio curve plotted within the entry window.", display=display.none)
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // STRATEGY SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
 strat_group = "Strategy"
@@ -61,24 +76,6 @@ i_sl_buffer = input.float(3.0, "SL Buffer (Pips)", group=strat_group, minval=0, 
 i_tp_type = input.string("None", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=strat_group, display=display.none)
 i_tp_ratio = input.float(1.5, "TP Risk:Reward Ratio", group=strat_group, minval=0.5, step=0.1, display=display.none)
 i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step=1, display=display.none)
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// WCSE (WICK CROSS SUPERTREND ENTRY)
-// ═══════════════════════════════════════════════════════════════════════════════
-wcse_group = "WCSE (Wick Cross ST Entry)"
-i_wcse_enabled = input.bool(false, "Enable WCSE", group=wcse_group, display=display.none)
-i_wcse_only = input.bool(false, "WCSE Only (disable signal entries)", group=wcse_group,
-     tooltip="When true, all signals arm WCSE — only WCSE pattern entries fire", display=display.none)
-i_wcse_entry_times = input.int(2, "Max TP Exits Per Swing", minval=0, group=wcse_group,
-     tooltip="0=unlimited. Only TP exits count; SL exits are free retries", display=display.none)
-i_wcse_c1_body = input.float(1.0, "C1 Min Body (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c1_wick = input.float(5.0, "C1 Wick Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c1_close = input.float(5.0, "C1 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_body = input.float(0.5, "C2 Min Body (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_wick = input.float(5.0, "C2 Wick Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_close = input.float(5.0, "C2 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_tp_rr = input.float(4.0, "TP Risk:Reward", group=wcse_group, minval=0.5, step=0.5, display=display.none)
-i_wcse_sl_buffer = input.float(0.0, "SL Buffer (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
 
 // Display
 disp_group = "Display"
@@ -130,46 +127,6 @@ plot(Trailingsl, color=linecolor, linewidth=2, title="PP SuperTrend", display=di
 bsignal = Trend == 1 and Trend[1] == -1
 ssignal = Trend == -1 and Trend[1] == 1
 
-// ── WCSE Pattern Detection Functions ──
-// 3-candle pullback-rejection pattern near SuperTrend support/resistance
-detect_wcse_long(c1_body_p, c1_wick_p, c1_close_p, c2_body_p, c2_wick_p, c2_close_p) =>
-    // C1 (bar [2]): RED, body >= threshold, wick touches/crosses TUp
-    c1_red = close[2] < open[2]
-    c1_body = open[2] - close[2]
-    c1_body_ok = c1_body >= pips_to_price(c1_body_p)
-    c1_touch = (low[2] >= TUp[2]) and ((low[2] - TUp[2]) <= pips_to_price(c1_wick_p) or math.abs(close[2] - TUp[2]) <= pips_to_price(c1_close_p))
-    c1_cross = (low[2] < TUp[2]) and (close[2] > TUp[2])
-    c1_ok = c1_red and c1_body_ok and (c1_touch or c1_cross)
-    // C2 (bar [1]): GREEN, body >= threshold, touch TUp, no cross
-    c2_green = close[1] > open[1]
-    c2_body = close[1] - open[1]
-    c2_body_ok = c2_body >= pips_to_price(c2_body_p)
-    c2_touch = (low[1] >= TUp[1]) and ((low[1] - TUp[1]) <= pips_to_price(c2_wick_p) or math.abs(close[1] - TUp[1]) <= pips_to_price(c2_close_p))
-    c2_no_cross = low[1] >= TUp[1]
-    c2_ok = c2_green and c2_body_ok and c2_touch and c2_no_cross
-    // C3 (bar [0]): GREEN (close > open)
-    c3_green = close > open
-    c1_ok and c2_ok and c3_green
-
-detect_wcse_short(c1_body_p, c1_wick_p, c1_close_p, c2_body_p, c2_wick_p, c2_close_p) =>
-    // C1 (bar [2]): GREEN, body >= threshold, wick touches/crosses TDown
-    c1_green = close[2] > open[2]
-    c1_body = close[2] - open[2]
-    c1_body_ok = c1_body >= pips_to_price(c1_body_p)
-    c1_touch = (high[2] <= TDown[2]) and ((TDown[2] - high[2]) <= pips_to_price(c1_wick_p) or math.abs(close[2] - TDown[2]) <= pips_to_price(c1_close_p))
-    c1_cross = (high[2] > TDown[2]) and (close[2] < TDown[2])
-    c1_ok = c1_green and c1_body_ok and (c1_touch or c1_cross)
-    // C2 (bar [1]): RED, body >= threshold, touch TDown, no cross
-    c2_red = close[1] < open[1]
-    c2_body = open[1] - close[1]
-    c2_body_ok = c2_body >= pips_to_price(c2_body_p)
-    c2_touch = (high[1] <= TDown[1]) and ((TDown[1] - high[1]) <= pips_to_price(c2_wick_p) or math.abs(close[1] - TDown[1]) <= pips_to_price(c2_close_p))
-    c2_no_cross = high[1] <= TDown[1]
-    c2_ok = c2_red and c2_body_ok and c2_touch and c2_no_cross
-    // C3 (bar [0]): RED (close < open)
-    c3_red = close < open
-    c1_ok and c2_ok and c3_red
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // VOLUME FILTER CALCULATION
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -196,13 +153,33 @@ if use_quiet
         is_quiet := current_minutes >= quiet_start_minutes or current_minutes < quiet_end_minutes
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY TIME WINDOW CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+etw_h = hour(time, etw_tz)
+etw_m = minute(time, etw_tz)
+etw_current_minutes = etw_h * 60 + etw_m
+etw_start_minutes = etw_start_hour * 60 + etw_start_min
+etw_end_minutes = etw_end_hour * 60 + etw_end_min
+
+is_in_entry_window = true  // default: no restriction when disabled
+if use_entry_window
+    if etw_start_minutes <= etw_end_minutes
+        // Normal range (e.g. 16:00 - 16:30)
+        is_in_entry_window := etw_current_minutes >= etw_start_minutes and etw_current_minutes < etw_end_minutes
+    else
+        // Overnight range (e.g. 22:00 - 02:00)
+        is_in_entry_window := etw_current_minutes >= etw_start_minutes or etw_current_minutes < etw_end_minutes
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // FILTER LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════
-// Filtered = signal exists but blocked by quiet hours OR low volume
+// Filtered = signal exists but blocked by quiet hours OR low volume OR outside entry window
 // When filtered: hold existing position, do nothing
-is_vol_filtered = (bsignal or ssignal) and is_low_vol and not is_quiet
+// Priority: QH > ETW > Vol (labels show highest-priority reason)
+is_vol_filtered = (bsignal or ssignal) and is_low_vol and not is_quiet and is_in_entry_window
 is_qh_filtered = (bsignal or ssignal) and is_quiet
-is_filtered = is_quiet or is_low_vol
+is_etw_filtered = (bsignal or ssignal) and use_entry_window and not is_in_entry_window and not is_quiet
+is_filtered = is_quiet or is_low_vol or (use_entry_window and not is_in_entry_window)
 
 // ── Volume Recovery (deferred entry) ──
 // When signal is vol-filtered, wait up to N bars for volume to recover
@@ -233,8 +210,8 @@ if deferred_dir == 1 and (Trend != 1 or deferred_age > vol_recovery_bars)
 if deferred_dir == -1 and (Trend != -1 or deferred_age > vol_recovery_bars)
     deferred_dir := 0
 
-// Volume recovered? Enter the deferred trade (skip if in quiet hours)
-vol_recovered = not is_low_vol and not is_quiet
+// Volume recovered? Enter the deferred trade (skip if in quiet hours or outside entry window)
+vol_recovered = not is_low_vol and not is_quiet and is_in_entry_window
 deferred_buy = deferred_dir == 1 and vol_recovered and deferred_age > 0 and vol_recovery_bars > 0
 deferred_sell = deferred_dir == -1 and vol_recovered and deferred_age > 0 and vol_recovery_bars > 0
 
@@ -267,47 +244,9 @@ if filtered_exit_countdown > 0
     if filtered_exit_countdown == 0
         filtered_exit_now := true
 
-// ── WCSE State ──
-var int wcse_armed_dir = 0      // 1=LONG armed, -1=SHORT armed, 0=off
-var int wcse_tp_exits = 0       // TP exit count for entry_times gating
-var int wcse_entry_source = 0   // 0=signal, 1=wcse (tracks current position source)
-var int wcse_armed_count = 0    // stats: total arm events
-var int wcse_entry_count = 0    // stats: total WCSE entries
-var int wcse_skip_count = 0     // stats: pattern matched but entry skipped (sl_dist <= 0)
-
-// ── WCSE Auto-Arm (always armed in current trend direction) ──
-if i_wcse_enabled
-    if Trend == 1
-        if wcse_armed_dir != 1
-            wcse_tp_exits := 0
-            wcse_armed_count := wcse_armed_count + 1
-        wcse_armed_dir := 1
-    else if Trend == -1
-        if wcse_armed_dir != -1
-            wcse_tp_exits := 0
-            wcse_armed_count := wcse_armed_count + 1
-        wcse_armed_dir := -1
-    else
-        wcse_armed_dir := 0
-
 // Actionable signals (passed all filters OR volume recovered)
 buy_signal = (bsignal and not is_filtered) or deferred_buy
 sell_signal = (ssignal and not is_filtered) or deferred_sell
-
-// ── WCSE Pattern Detection ──
-// Call detection functions unconditionally to maintain series history (PineScript best practice)
-_wcse_long_pattern = detect_wcse_long(i_wcse_c1_body, i_wcse_c1_wick, i_wcse_c1_close, i_wcse_c2_body, i_wcse_c2_wick, i_wcse_c2_close)
-_wcse_short_pattern = detect_wcse_short(i_wcse_c1_body, i_wcse_c1_wick, i_wcse_c1_close, i_wcse_c2_body, i_wcse_c2_wick, i_wcse_c2_close)
-
-wcse_buy = false
-wcse_sell = false
-if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0
-    can_enter = i_wcse_entry_times == 0 or wcse_tp_exits < i_wcse_entry_times
-    if can_enter and not is_quiet
-        if wcse_armed_dir == 1
-            wcse_buy := _wcse_long_pattern
-        if wcse_armed_dir == -1
-            wcse_sell := _wcse_short_pattern
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // POSITION MANAGEMENT
@@ -317,28 +256,6 @@ var float sl_price = na
 var float original_sl = na
 var float tp_price = na
 var int position_dir = 0  // 1=long, -1=short, 0=flat
-
-// ── Signal Swing Close ──
-// Any trend change closes opposite position IMMEDIATELY, regardless of filters.
-// Vol filter / WCSE / quiet hours only gate NEW entries, never block exits.
-if bsignal and strategy.position_size < 0
-    strategy.close("Short", comment="Swing Close")
-    entry_price := na
-    sl_price := na
-    original_sl := na
-    tp_price := na
-    position_dir := 0
-    filtered_exit_countdown := 0
-    filtered_exit_dir := 0
-if ssignal and strategy.position_size > 0
-    strategy.close("Long", comment="Swing Close")
-    entry_price := na
-    sl_price := na
-    original_sl := na
-    tp_price := na
-    position_dir := 0
-    filtered_exit_countdown := 0
-    filtered_exit_dir := 0
 
 // Filtered exit: close opposite position after countdown
 if filtered_exit_now
@@ -358,18 +275,9 @@ if filtered_exit_now
         position_dir := 0
     filtered_exit_dir := 0
 
-// Track entries this bar to prevent "Reset on flat" from wiping position vars
-// (with process_orders_on_close=true, strategy.position_size is still 0 on entry bar)
-entered_this_bar = false
-
-// Snapshot entry source BEFORE entries modify it (for trade close TP tracking)
-int closing_entry_source = wcse_entry_source
-
-if buy_signal and strategy.position_size <= 0 and not i_wcse_only
+if buy_signal and strategy.position_size <= 0
     // Enter LONG from flat or reverse from SHORT
     // Skip if already LONG (after filtered SELL → position continues with trailing SL)
-    entered_this_bar := true
-    wcse_entry_source := 0
     entry_price := close + pips_to_price(i_spread_pips)
     sl_price := Trailingsl - pips_to_price(i_sl_buffer)
     original_sl := sl_price
@@ -392,11 +300,9 @@ if buy_signal and strategy.position_size <= 0 and not i_wcse_only
     position_dir := 1
     strategy.entry("Long", strategy.long, qty=qty)
 
-if sell_signal and strategy.position_size >= 0 and not i_wcse_only
+if sell_signal and strategy.position_size >= 0
     // Enter SHORT from flat or reverse from LONG
     // Skip if already SHORT (after filtered BUY → position continues with trailing SL)
-    entered_this_bar := true
-    wcse_entry_source := 0
     entry_price := close - pips_to_price(i_spread_pips)
     sl_price := Trailingsl + pips_to_price(i_sl_buffer)
     original_sl := sl_price
@@ -419,71 +325,12 @@ if sell_signal and strategy.position_size >= 0 and not i_wcse_only
     position_dir := -1
     strategy.entry("Short", strategy.short, qty=qty)
 
-// ── WCSE Entry Execution ──
-// All variable assignments inside sl_dist guard to avoid corrupting position state
-// wcse_buy_entry/wcse_sell_entry track ACTUAL entries (not just pattern matches)
-wcse_buy_entry = false
-wcse_sell_entry = false
-
-if wcse_buy and strategy.position_size <= 0
-    float wcse_ep = close + pips_to_price(i_spread_pips)
-    float wcse_sl = TUp - pips_to_price(i_wcse_sl_buffer)
-    float wcse_dist = wcse_ep - wcse_sl
-    if wcse_dist > 0
-        entered_this_bar := true
-        wcse_entry_source := 1
-        entry_price := wcse_ep
-        sl_price := wcse_sl
-        original_sl := sl_price
-        tp_price := wcse_ep + wcse_dist * i_wcse_tp_rr
-        float qty = i_units
-        if i_sizing_mode == "Compound Risk %"
-            risk_amount = strategy.equity * i_risk_percent / 100
-            qty := math.floor(risk_amount / wcse_dist)
-            qty := math.min(qty, i_max_position)
-            qty := math.max(qty, 1)
-        position_dir := 1
-        wcse_entry_count := wcse_entry_count + 1
-        wcse_buy_entry := true
-        strategy.entry("Long", strategy.long, qty=qty)
-        // Place exit order immediately (activates once entry fills)
-        strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
-    else
-        wcse_skip_count := wcse_skip_count + 1
-
-if wcse_sell and strategy.position_size >= 0
-    float wcse_ep = close - pips_to_price(i_spread_pips)
-    float wcse_sl = TDown + pips_to_price(i_wcse_sl_buffer)
-    float wcse_dist = wcse_sl - wcse_ep
-    if wcse_dist > 0
-        entered_this_bar := true
-        wcse_entry_source := 1
-        entry_price := wcse_ep
-        sl_price := wcse_sl
-        original_sl := sl_price
-        tp_price := wcse_ep - wcse_dist * i_wcse_tp_rr
-        float qty = i_units
-        if i_sizing_mode == "Compound Risk %"
-            risk_amount = strategy.equity * i_risk_percent / 100
-            qty := math.floor(risk_amount / wcse_dist)
-            qty := math.min(qty, i_max_position)
-            qty := math.max(qty, 1)
-        position_dir := -1
-        wcse_entry_count := wcse_entry_count + 1
-        wcse_sell_entry := true
-        strategy.entry("Short", strategy.short, qty=qty)
-        // Place exit order immediately (activates once entry fills)
-        strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
-    else
-        wcse_skip_count := wcse_skip_count + 1
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // SUPERTREND TRAILING STOP
 // ═══════════════════════════════════════════════════════════════════════════════
 // Trail SL with SuperTrend: use TUp for longs, TDown for shorts
 // CRITICAL: use TUp/TDown directly, NOT Trailingsl (which flips with trend)
-// WCSE entries use FIXED SL (no trailing) — trailing would exit before TP at RR 4.0
-if strategy.position_size != 0 and not na(original_sl) and wcse_entry_source != 1
+if strategy.position_size != 0 and not na(original_sl)
     if position_dir == 1 and not na(TUp)
         trailing_sl = TUp - pips_to_price(i_sl_buffer)
         if trailing_sl > original_sl and trailing_sl > sl_price
@@ -508,9 +355,8 @@ if strategy.position_size < 0 and not na(sl_price)
     else
         strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
 
-// Reset on flat — but NOT on entry bars (with process_orders_on_close=true,
-// strategy.position_size is still 0 during script execution on the entry bar)
-if strategy.position_size == 0 and position_dir != 0 and not entered_this_bar
+// Reset on flat
+if strategy.position_size == 0 and position_dir != 0
     entry_price := na
     sl_price := na
     original_sl := na
@@ -531,13 +377,6 @@ if strategy.closedtrades > nz(strategy.closedtrades[1])
     was_short = trade_size < 0
     pnl_text = pnl >= 0 ? "$" + str.tostring(pnl, "#.##") : "-$" + str.tostring(math.abs(pnl), "#.##")
     pnl_color = pnl >= 0 ? color.green : color.red
-    // WCSE TP tracking: use snapshot from BEFORE entries modified wcse_entry_source
-    if closing_entry_source == 1 and pnl > 0
-        wcse_tp_exits := wcse_tp_exits + 1
-    // Only reset entry source if we didn't just open a new position this bar
-    // (WCSE re-entry on the same bar as previous trade close is common after TP hits)
-    if not entered_this_bar
-        wcse_entry_source := 0
     // SHORT exit → P&L above (BUY signal is below), LONG exit → P&L below (SELL signal is above)
     label.new(bar_index, na, pnl_text,
          style=label.style_none,
@@ -566,11 +405,11 @@ if barstate.islast and strategy.opentrades > 0
 // Quiet hours: light yellow background (continuous zone)
 bgcolor(is_quiet and use_quiet ? color.new(color.yellow, 88) : na, title="Quiet Hours Zone")
 
+// Entry window: light blue background (continuous zone)
+bgcolor(use_entry_window and is_in_entry_window ? color.new(color.blue, 92) : na, title="Entry Window Zone")
+
 // Volume filtered signal: light gray background (single bar flash)
 bgcolor(is_vol_filtered and show_vol_filter ? color.new(color.gray, 80) : na, title="Vol Filtered Signal")
-
-// WCSE armed: subtle tint shows when WCSE is actively scanning for patterns
-bgcolor(i_wcse_enabled and wcse_armed_dir == 1 ? color.new(color.aqua, 93) : i_wcse_enabled and wcse_armed_dir == -1 ? color.new(color.fuchsia, 93) : na, title="WCSE Armed")
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VISUAL: SIGNAL LABELS
@@ -590,6 +429,13 @@ plotshape(bsignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, titl
 plotshape(ssignal and is_qh_filtered and show_vol_filter ? Trailingsl : na, title="QH Filtered Sell", text="xS\nQH",
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.yellow, 30), textcolor=color.black, display=display.pane)
+// Entry window filtered (outside allowed window, not already caught by QH)
+plotshape(bsignal and is_etw_filtered and show_vol_filter ? Trailingsl : na, title="ETW Filtered Buy", text="xB\nETW",
+     location=location.absolute, style=shape.labelup, size=size.tiny,
+     color=color.new(color.blue, 30), textcolor=color.white, display=display.pane)
+plotshape(ssignal and is_etw_filtered and show_vol_filter ? Trailingsl : na, title="ETW Filtered Sell", text="xS\nETW",
+     location=location.absolute, style=shape.labeldown, size=size.tiny,
+     color=color.new(color.blue, 30), textcolor=color.white, display=display.pane)
 // Vol filtered (still blocked — no recovery yet or recovery disabled)
 plotshape(bsignal and is_vol_filtered and not deferred_buy and show_vol_filter ? Trailingsl : na, title="Vol Filtered Buy", text="xB\nVol",
      location=location.absolute, style=shape.labelup, size=size.tiny,
@@ -605,33 +451,6 @@ plotshape(deferred_sell and showlabel ? Trailingsl : na, title="Vol Recovery Sel
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.red, 30), textcolor=color.white, display=display.pane)
 
-// WCSE actual entries (cyan/magenta — trade executed) with EP/SL/TP info
-if wcse_buy_entry and showlabel
-    wcse_info = "WC Buy\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
-    label.new(bar_index, TUp, wcse_info,
-         style=label.style_label_up, size=size.small,
-         color=color.aqua, textcolor=color.black)
-    // TP price label at TP level
-    label.new(bar_index, tp_price, "TP " + str.tostring(tp_price, "#.#####"),
-         style=label.style_label_left, size=size.tiny,
-         color=color.new(color.green, 30), textcolor=color.white)
-if wcse_sell_entry and showlabel
-    wcse_info = "WC Sell\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
-    label.new(bar_index, TDown, wcse_info,
-         style=label.style_label_down, size=size.small,
-         color=color.fuchsia, textcolor=color.white)
-    // TP price label at TP level
-    label.new(bar_index, tp_price, "TP " + str.tostring(tp_price, "#.#####"),
-         style=label.style_label_left, size=size.tiny,
-         color=color.new(color.red, 30), textcolor=color.white)
-// WCSE pattern matched but entry skipped (SL >= entry price → no valid SL distance)
-plotshape(wcse_buy and not wcse_buy_entry and showlabel ? TUp : na, title="WCSE Skip Buy", text="WC\nSkip",
-     location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.new(color.aqua, 60), textcolor=color.new(color.black, 60), display=display.pane)
-plotshape(wcse_sell and not wcse_sell_entry and showlabel ? TDown : na, title="WCSE Skip Sell", text="WC\nSkip",
-     location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.new(color.fuchsia, 60), textcolor=color.new(color.white, 60), display=display.pane)
-
 // Filtered exit (delayed close after countdown)
 plotshape(filtered_exit_now and filtered_exit_dir == 1 and show_vol_filter, title="Filtered Exit Short", text="FX",
      location=location.abovebar, style=shape.xcross, size=size.tiny,
@@ -646,9 +465,70 @@ plot(plot_sl_tp and strategy.position_size != 0 ? tp_price : na, "Take Profit", 
 plot(plot_sl_tp and strategy.position_size != 0 ? entry_price : na, "Entry Price", color=color.blue, style=plot.style_linebr, linewidth=1, display=display.pane)
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ENTRY WINDOW VOLUME RATIO CURVE (separate sub-pane)
+// ═══════════════════════════════════════════════════════════════════════════════
+etw_vol_sma = ta.sma(volume, etw_vol_sma_period)
+etw_vol_ratio = etw_vol_sma > 0 ? volume / etw_vol_sma : 0.0
+etw_vol_plot = use_entry_window ? etw_vol_ratio : na
+etw_vol_color = is_in_entry_window ? color.purple : color.new(color.gray, 60)
+plot(etw_vol_plot, "ETW Vol Ratio", color=etw_vol_color, linewidth=1, force_overlay=false)
+plot(use_entry_window ? 1.0 : na, "Vol Ratio 1.0", color=color.gray, style=plot.style_circles, linewidth=1, force_overlay=false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PERIOD RETURN TRACKING
+// ═══════════════════════════════════════════════════════════════════════════════
+var float week_start_equity = strategy.initial_capital
+var float month_start_equity = strategy.initial_capital
+var float year_start_equity = strategy.initial_capital
+var float weekly_ret_sum = 0.0
+var int weekly_ret_count = 0
+var float monthly_ret_sum = 0.0
+var int monthly_ret_count = 0
+var float yearly_ret_sum = 0.0
+var int yearly_ret_count = 0
+
+// Detect period boundaries using timezone from entry window (or quiet hours if ETW disabled)
+period_tz = use_entry_window ? etw_tz : quiet_tz
+cur_week = weekofyear(time, period_tz)
+cur_month = month(time, period_tz)
+cur_year = year(time, period_tz)
+prev_week = weekofyear(time[1], period_tz)
+prev_month = month(time[1], period_tz)
+prev_year = year(time[1], period_tz)
+
+// Weekly boundary
+if cur_week != prev_week and bar_index > 0
+    if week_start_equity > 0
+        week_ret = (strategy.equity[1] - week_start_equity) / week_start_equity * 100
+        weekly_ret_sum := weekly_ret_sum + week_ret
+        weekly_ret_count := weekly_ret_count + 1
+    week_start_equity := strategy.equity[1]
+
+// Monthly boundary
+if cur_month != prev_month and bar_index > 0
+    if month_start_equity > 0
+        month_ret = (strategy.equity[1] - month_start_equity) / month_start_equity * 100
+        monthly_ret_sum := monthly_ret_sum + month_ret
+        monthly_ret_count := monthly_ret_count + 1
+    month_start_equity := strategy.equity[1]
+
+// Yearly boundary
+if cur_year != prev_year and bar_index > 0
+    if year_start_equity > 0
+        year_ret = (strategy.equity[1] - year_start_equity) / year_start_equity * 100
+        yearly_ret_sum := yearly_ret_sum + year_ret
+        yearly_ret_count := yearly_ret_count + 1
+    year_start_equity := strategy.equity[1]
+
+// Include current (incomplete) period in averages on last bar
+avg_weekly_ret = weekly_ret_count > 0 ? weekly_ret_sum / weekly_ret_count : 0.0
+avg_monthly_ret = monthly_ret_count > 0 ? monthly_ret_sum / monthly_ret_count : 0.0
+avg_yearly_ret = yearly_ret_count > 0 ? yearly_ret_sum / yearly_ret_count : 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // STATISTICS TABLE
 // ═══════════════════════════════════════════════════════════════════════════════
-var table stats_table = table.new(position.top_right, 2, 32, bgcolor=color.new(color.white, 80), border_width=1)
+var table stats_table = table.new(position.top_right, 2, 35, bgcolor=color.new(color.white, 80), border_width=1)
 
 // Track filter counts
 var int total_signals = 0
@@ -656,6 +536,7 @@ var int vol_filtered_count = 0
 var int vol_recovered_count = 0
 var int filtered_exit_count = 0
 var int qh_filtered_count = 0
+var int etw_filtered_count = 0
 var int traded_count = 0
 
 if bsignal or ssignal
@@ -668,6 +549,8 @@ if filtered_exit_now
     filtered_exit_count := filtered_exit_count + 1
 if is_qh_filtered
     qh_filtered_count := qh_filtered_count + 1
+if is_etw_filtered
+    etw_filtered_count := etw_filtered_count + 1
 if buy_signal or sell_signal
     traded_count := traded_count + 1
 
@@ -696,6 +579,11 @@ if show_stats and barstate.islast
     table.cell(stats_table, 0, row, "Quiet Hours", text_color=color.black, text_size=size.small)
     qh_info = use_quiet ? str.tostring(quiet_start_hour, "00") + ":" + str.tostring(quiet_start_min, "00") + "-" + str.tostring(quiet_end_hour, "00") + ":" + str.tostring(quiet_end_min, "00") : "OFF"
     table.cell(stats_table, 1, row, qh_info, text_color=use_quiet ? color.blue : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "Entry Window", text_color=color.black, text_size=size.small)
+    etw_info = use_entry_window ? str.tostring(etw_start_hour, "00") + ":" + str.tostring(etw_start_min, "00") + "-" + str.tostring(etw_end_hour, "00") + ":" + str.tostring(etw_end_min, "00") : "OFF"
+    table.cell(stats_table, 1, row, etw_info, text_color=use_entry_window ? color.blue : color.gray, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "Sizing", text_color=color.black, text_size=size.small)
@@ -741,6 +629,10 @@ if show_stats and barstate.islast
 
     table.cell(stats_table, 0, row, "QH Filtered", text_color=color.black, text_size=size.small)
     table.cell(stats_table, 1, row, str.tostring(qh_filtered_count), text_color=qh_filtered_count > 0 ? color.orange : color.gray, text_size=size.small)
+    row := row + 1
+
+    table.cell(stats_table, 0, row, "ETW Filtered", text_color=color.black, text_size=size.small)
+    table.cell(stats_table, 1, row, str.tostring(etw_filtered_count), text_color=etw_filtered_count > 0 ? color.blue : color.gray, text_size=size.small)
     row := row + 1
 
     table.cell(stats_table, 0, row, "Traded", text_color=color.black, text_size=size.small)
@@ -795,30 +687,21 @@ if show_stats and barstate.islast
     table.cell(stats_table, 1, row, pos_info, text_color=strategy.position_size != 0 ? color.blue : color.gray, text_size=size.small)
     row := row + 1
 
-    // WCSE stats
-    if i_wcse_enabled
-        table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
-        table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
-        row := row + 1
+    // Period returns section
+    table.cell(stats_table, 0, row, "─────────", text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 1, row, "─────────", text_color=color.gray, text_size=size.small)
+    row := row + 1
 
-        table.cell(stats_table, 0, row, "WCSE Mode", text_color=color.black, text_size=size.small)
-        wcse_mode = i_wcse_only ? "WCSE Only" : "Mixed"
-        table.cell(stats_table, 1, row, wcse_mode, text_color=color.aqua, text_size=size.small)
-        row := row + 1
+    table.cell(stats_table, 0, row, "Avg Weekly Ret", text_color=color.black, text_size=size.small)
+    w_info = weekly_ret_count > 0 ? str.tostring(avg_weekly_ret, "#.##") + "% (" + str.tostring(weekly_ret_count) + "w)" : "N/A"
+    table.cell(stats_table, 1, row, w_info, text_color=avg_weekly_ret >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
 
-        table.cell(stats_table, 0, row, "WCSE Armed", text_color=color.black, text_size=size.small)
-        wcse_arm_info = str.tostring(wcse_armed_count) + (wcse_armed_dir == 1 ? " (LONG)" : wcse_armed_dir == -1 ? " (SHORT)" : "")
-        table.cell(stats_table, 1, row, wcse_arm_info, text_color=wcse_armed_count > 0 ? color.aqua : color.gray, text_size=size.small)
-        row := row + 1
+    table.cell(stats_table, 0, row, "Avg Monthly Ret", text_color=color.black, text_size=size.small)
+    m_info = monthly_ret_count > 0 ? str.tostring(avg_monthly_ret, "#.##") + "% (" + str.tostring(monthly_ret_count) + "m)" : "N/A"
+    table.cell(stats_table, 1, row, m_info, text_color=avg_monthly_ret >= 0 ? color.green : color.red, text_size=size.small)
+    row := row + 1
 
-        table.cell(stats_table, 0, row, "WCSE Entries", text_color=color.black, text_size=size.small)
-        table.cell(stats_table, 1, row, str.tostring(wcse_entry_count) + (wcse_skip_count > 0 ? " (" + str.tostring(wcse_skip_count) + " skip)" : ""), text_color=wcse_entry_count > 0 ? color.aqua : color.gray, text_size=size.small)
-        row := row + 1
-
-        table.cell(stats_table, 0, row, "WCSE TP Exits", text_color=color.black, text_size=size.small)
-        table.cell(stats_table, 1, row, str.tostring(wcse_tp_exits) + "/" + str.tostring(i_wcse_entry_times == 0 ? 0 : i_wcse_entry_times), text_color=color.aqua, text_size=size.small)
-        row := row + 1
-
-        table.cell(stats_table, 0, row, "WCSE Settings", text_color=color.black, text_size=size.small)
-        wcse_info = "RR:" + str.tostring(i_wcse_tp_rr) + " ET:" + str.tostring(i_wcse_entry_times) + " W:" + str.tostring(i_wcse_c1_wick) + "/" + str.tostring(i_wcse_c2_wick)
-        table.cell(stats_table, 1, row, wcse_info, text_color=color.gray, text_size=size.small)
+    table.cell(stats_table, 0, row, "Avg Yearly Ret", text_color=color.black, text_size=size.small)
+    y_info = yearly_ret_count > 0 ? str.tostring(avg_yearly_ret, "#.##") + "% (" + str.tostring(yearly_ret_count) + "y)" : "N/A"
+    table.cell(stats_table, 1, row, y_info, text_color=avg_yearly_ret >= 0 ? color.green : color.red, text_size=size.small)

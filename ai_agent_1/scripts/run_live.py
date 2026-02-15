@@ -54,6 +54,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run PPST live paper trading")
     parser.add_argument("--config", default="config/default.yaml", help="Config file path")
     parser.add_argument("--risk", type=float, default=None, help="Override risk percent")
+    parser.add_argument("--logs-dir", default=None, help="Override logs directory")
     args = parser.parse_args()
 
     # Load config
@@ -62,7 +63,7 @@ def main():
         config = yaml.safe_load(f)
 
     live_cfg = config.get("live", {})
-    logs_dir = live_cfg.get("logs_dir", "logs")
+    logs_dir = args.logs_dir or live_cfg.get("logs_dir", "logs")
 
     # Set up logging
     setup_logging(logs_dir)
@@ -137,7 +138,9 @@ def main():
         be_enabled=circ_cfg["be_enabled"],
         be_trigger_pips=circ_cfg["be_trigger_pips"],
         be_offset_pips=circ_cfg["be_offset_pips"],
+        volume_threshold=circ_cfg.get("volume_threshold", 0.0),
     )
+    ppst_params["volume_filter_period"] = circ_cfg.get("volume_filter_period", 20)
 
     # Performance monitor
     monitor_cfg = config.get("monitor", {})

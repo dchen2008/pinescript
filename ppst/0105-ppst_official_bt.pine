@@ -1,0 +1,201 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue
+
+//@version=4
+strategy("PPST[OfficalBacktest]", overlay=true,
+         default_qty_type=strategy.fixed,
+         default_qty_value=10000,
+         initial_capital=10000,
+         currency=currency.USD,
+         commission_type=strategy.commission.percent,
+         commission_value=0.01)
+prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
+Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
+Pd=input(defval = 10, title = "ATR Period", minval=1)
+minrateu = input(defval = 1.0, title="Min profit Rate if Center Line Used", minval = 0)
+usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%")
+
+// === TAKE PROFIT OPTIONS ===
+useRRTP = input(defval = false, title="Use RR-Based Take Profit")
+rrRatio = input(defval = 1.5, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
+showTPLine = input(defval = true, title="Show TP Level Line")
+showpivot = input(defval = false, title="Show Pivot Points")
+showcl = input(defval = false, title="Show PP Center Line")
+onlylong = input(defval = false, title="Enter Only Long Position")
+float minrate = minrateu / 100
+
+// === TIME FILTERS ===
+// Backtest date range
+useTimeFilter = input(defval = true, title="Use Backtest Date Range")
+startDate = input(defval = timestamp("2024-01-01 00:00"), title="Start Date", type=input.time)
+endDate = input(defval = timestamp("2025-12-31 23:59"), title="End Date", type=input.time)
+
+// Daily quiet window (no trading)
+useQuietWindow = input(defval = true, title="Use Daily Quiet Window")
+quietStartHour = input(defval = 12, title="Quiet Window Start Hour (0-23)", minval=0, maxval=23)
+quietEndHour = input(defval = 18, title="Quiet Window End Hour (0-23)", minval=0, maxval=23)
+
+// Market open window (Sunday 2pm to Friday 2pm PT)
+useMarketWindow = input(defval = true, title="Use Market Open Window")
+marketOpenDay = input(defval = 1, title="Market Open Day (1=Sun, 7=Sat)", minval=1, maxval=7)
+marketOpenHour = input(defval = 14, title="Market Open Hour", minval=0, maxval=23)
+marketCloseDay = input(defval = 6, title="Market Close Day (1=Sun, 7=Sat)", minval=1, maxval=7)
+marketCloseHour = input(defval = 14, title="Market Close Hour", minval=0, maxval=23)
+
+// Time calculations (using PT timezone via exchange timezone or chart)
+currentHour = hour(time, "America/Los_Angeles")
+currentDay = dayofweek(time, "America/Los_Angeles")
+
+// Check if within backtest date range
+inDateRange = (not useTimeFilter) or (time >= startDate and time <= endDate)
+
+// Check if NOT in quiet window (quiet window = no trading)
+// Handle case where quiet window crosses midnight
+notInQuietWindow = (not useQuietWindow) or
+     (quietStartHour < quietEndHour ? (currentHour < quietStartHour or currentHour >= quietEndHour) :
+     (currentHour >= quietEndHour and currentHour < quietStartHour))
+
+// Check if market is open (Sunday 2pm PT to Friday 2pm PT)
+// dayofweek: 1=Sunday, 2=Monday, ... 6=Friday, 7=Saturday
+isMarketOpen() =>
+    if not useMarketWindow
+        true
+    else
+        // After Sunday open hour
+        afterSundayOpen = (currentDay == marketOpenDay and currentHour >= marketOpenHour) or currentDay > marketOpenDay
+        // Before Friday close hour
+        beforeFridayClose = (currentDay == marketCloseDay and currentHour < marketCloseHour) or currentDay < marketCloseDay
+        // Not Saturday
+        notWeekend = currentDay != 7
+        afterSundayOpen and beforeFridayClose and notWeekend
+
+// Combined filter: all conditions must be true to trade
+canTrade = inDateRange and notInQuietWindow and isMarketOpen()
+
+// Visual indicator for no-trade periods
+showNoTradeZones = input(defval = false, title="Show No-Trade Zones (Background)")
+bgcolor(showNoTradeZones and not canTrade ? color.new(color.gray, 90) : na, title="No Trade Zone")
+
+float ph = na
+float pl = na
+ph := pivothigh(prd, prd)
+pl := pivotlow(prd, prd)
+
+plotshape(ph and showpivot, text="H",  style=shape.labeldown, color=na, textcolor=color.red, location=location.abovebar, offset = -prd)
+plotshape(pl and showpivot, text="L",  style=shape.labeldown, color=na, textcolor=color.lime, location=location.belowbar, offset = -prd)
+
+float center = na
+center := center[1]
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        center := (center * 2 + lastpp) / 3
+
+Up = center - (Factor * atr(Pd))
+Dn = center + (Factor * atr(Pd))
+
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1: close < TUp[1]? -1: nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
+
+// === RR-BASED TP TRACKING ===
+// Track entry SL level and calculate TP
+var float entrySL = na
+var float tpLevel = na
+var int posDirection = 0  // 1 = long, -1 = short, 0 = flat
+
+// Detect new position entry (only track if RR TP is enabled)
+newLongEntry = useRRTP and strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_size[1] >= 0
+positionClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+
+// Capture SL and calculate TP on new entry
+if newLongEntry
+    entrySL := Trailingsl  // SL is the current trailing stop
+    risk = strategy.position_avg_price - entrySL
+    tpLevel := strategy.position_avg_price + (risk * rrRatio)
+    posDirection := 1
+
+if newShortEntry
+    entrySL := Trailingsl  // SL is the current trailing stop
+    risk = entrySL - strategy.position_avg_price
+    tpLevel := strategy.position_avg_price - (risk * rrRatio)
+    posDirection := -1
+
+if positionClosed
+    entrySL := na
+    tpLevel := na
+    posDirection := 0
+
+// Plot TP level and Entry SL for debugging
+plot(useRRTP and showTPLine and not na(tpLevel) ? tpLevel : na,
+     color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr, title="TP Level")
+plot(useRRTP and showTPLine and not na(entrySL) ? entrySL : na,
+     color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr, title="Entry SL Level")
+
+// Debug label on entry
+showDebugLabels = input(defval = false, title="Show TP Debug Labels")
+if newLongEntry and showDebugLabels
+    label.new(bar_index, high, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+              color=color.green, textcolor=color.white, size=size.small)
+if newShortEntry and showDebugLabels
+    label.new(bar_index, low, "TP:" + tostring(tpLevel, "#.#####") + "\nSL:" + tostring(entrySL, "#.#####") + "\nEntry:" + tostring(strategy.position_avg_price, "#.#####"),
+              color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
+
+plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
+
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+halfexited = false
+halfexited := nz(halfexited[1], false)
+
+// Track if TP was hit this bar (to avoid close_all overriding TP exit)
+var bool tpHitThisBar = false
+tpHitThisBar := false
+
+// RR-based Take Profit exits (check BEFORE trend reversal close)
+if useRRTP and not na(tpLevel)
+    // Long TP hit
+    if posDirection == 1 and high >= tpLevel
+        strategy.close("Buy", comment = "TP Hit")
+        tpLevel := na
+        entrySL := na
+        tpHitThisBar := true
+    // Short TP hit
+    if posDirection == -1 and low <= tpLevel
+        strategy.close("Sell", comment = "TP Hit")
+        tpLevel := na
+        entrySL := na
+        tpHitThisBar := true
+
+// Close on trend reversal (only if TP wasn't hit)
+if change(Trend) and not tpHitThisBar
+    strategy.close_all()
+
+if bsignal and canTrade
+    strategy.entry("Buy", true, comment = "Buy")
+if ssignal and not onlylong and canTrade
+    strategy.entry("Sell", false, comment = "Sell")
+
+cpsize = change(strategy.position_size)
+if change(strategy.position_size)
+    if cpsize > 0 and strategy.position_size > 0 or cpsize< 0 and strategy.position_size < 0
+        halfexited := false
+    
+if strategy.position_size > 0 and center > hl2 and usecenter and not halfexited and close > strategy.position_avg_price * (1 + minrate)
+    strategy.close("Buy", qty_percent = 50, comment = "close buy for 50%")
+    halfexited := true
+if strategy.position_size < 0 and center < hl2 and usecenter and not halfexited and close < strategy.position_avg_price * (1 - minrate)
+    strategy.close("Sell", qty_percent = 50, comment = "close sell for 50%")
+    halfexited := true
+

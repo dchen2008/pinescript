@@ -12,7 +12,7 @@ timeframes:
 # PPST Indicator
 ppst:
   pivot_period: 2
-  atr_factor: 4.5    # Optimized: best risk-adjusted at 1.5% risk (7.02% avg weekly, 34.8% max DD)
+  atr_factor: 5    # Optimized: best risk-adjusted at 1.5% risk (7.02% avg weekly, 34.8% max DD)
   atr_period: 10
 
 # Time Filter (PT timezone)
@@ -31,11 +31,27 @@ time_filter:
 # Position Sizing
 sizing:
   initial_capital: 10000.0
-  risk_percent: 15.0          # Optimized: aggressive compound sizing
+  risk_percent: 1.0          # Optimized: aggressive compound sizing
   max_position_units: 10000000  # Raised from 100K to allow proper compound sizing
 
 # Spread
 spread_pips: 1.5
+
+# Wick Cross SuperTrend Entry (WCSE)
+# Alternative entry on vol-filtered signals via 3-candle pullback pattern
+wcse:
+  enabled: false
+  entry_times: 2           # Max TP exits per swing (0=unlimited)
+  c1_body_pips: 1.0        # 1st candle min body size
+  c1_wick_pips: 5.0        # 1st candle wick proximity to ST
+  c1_close_pips: 5.0       # 1st candle close proximity to ST
+  c2_body_pips: 0.5        # 2nd candle min body size
+  c2_wick_pips: 5.0        # 2nd candle wick proximity to ST
+  c2_close_pips: 5.0       # 2nd candle close proximity to ST
+  tp_rr: 4.0               # TP risk:reward ratio
+  sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
+  vf_skip: true            # Skip vol filter for WCSE entries
+  vf_threshold: 3.0         # Alt vol threshold (when vf_skip=false)
 
 # Signal Strategy (ppst_official_bt) - baseline, not recommended
 signal_strategy:
@@ -60,6 +76,28 @@ circle_strategy:
   trail_with_supertrend: true
   volume_filter_period: 20   # SMA lookback for relative volume
   volume_threshold: 0.0      # 0 = disabled, 1.5 = require 1.5x avg volume
+
+# Huge Movement Trade Strategy (HMTS)
+hmts:
+  enable: true
+  movement_req:
+    num_candles: 10         # Max candles from S1 to S2
+    pips: 60                # Min pip movement S1->S2
+  revert_signal_req:
+    num_candles: 6          # Max candles from S2 to S3
+    min_pips: 10            # Min revert pips
+    max_pips: 30            # Max revert pips (< this)
+  hmts_sl:
+    s1_init_sl_spread_buffer: true  # SL = SuperTrend +/- spread_pips
+    s2_revert_cross_limit: 8       # During revert, if price crosses S1's ST by > N pips, close
+  hmts_tp:
+    s3_swing_tp_enable: true       # Always true: trail with S3's SuperTrend until crossed
+    close_by_tp_rr: 7.0            # Pre-active TP at RR 7.0 from original SL distance. 0=disabled
+  position:
+    allow_second_entry: true       # Re-enter same dir after TP hit
+  # Base signal behavior for non-HMTS signals
+  base_rr_ratio: 1.5
+  trail_with_supertrend: true
 
 # VWAP Mean Reversion Strategy
 vwap_strategy:

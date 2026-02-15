@@ -1,0 +1,101 @@
+
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue
+
+//@version=4
+study("PPST_VOL_RSI_Filter", overlay = true)
+prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
+Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
+Pd=input(defval = 10, title = "ATR Period", minval=1)
+showpivot = input(defval = false, title="Show Pivot Points")
+showlabel = input(defval = true, title="Show Buy/Sell Labels")
+showcl = input(defval = false, title="Show PP Center Line")
+showsr = input(defval = false, title="Show Support/Resistance")
+
+// Volume & RSI Quality Filter
+showquality = input(defval = true, title="Show Low-Quality Zones")
+suppresssignals = input(defval = false, title="Suppress Signals in Low-Quality Zones")
+filtermode = input(defval = "Both", title="Filter Mode", options=["Volume Only", "RSI Only", "Both"])
+vol_accum_bars = input(defval = 30, title="Volume Accumulation Window (bars)", minval = 1, maxval = 500)
+vol_avg_period = input(defval = 100, title="Volume Average Lookback", minval = 1, maxval = 1000)
+vol_threshold = input(defval = 50.0, title="Volume Threshold (%)", minval = 1.0, step = 5.0)
+rsi_period = input(defval = 14, title="RSI Period", minval = 1)
+rsi_low = input(defval = 40, title="RSI Dead Zone Low", minval = 1, maxval = 50)
+rsi_high = input(defval = 60, title="RSI Dead Zone High", minval = 50, maxval = 99)
+
+// get Pivot High/Low
+float ph = pivothigh(prd, prd)
+float pl = pivotlow(prd, prd)
+
+// drawl Pivot Points if "showpivot" is enabled
+plotshape(ph and showpivot, text="H",  style=shape.labeldown, color=na, textcolor=color.red, location=location.abovebar, transp=0, offset = -prd)
+plotshape(pl and showpivot, text="L",  style=shape.labeldown, color=na, textcolor=color.lime, location=location.belowbar, transp=0, offset = -prd)
+
+// calculate the Center line using pivot points
+var float center = na
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        //weighted calculation
+        center := (center * 2 + lastpp) / 3
+
+// upper/lower bands calculation
+Up = center - (Factor * atr(Pd))
+Dn = center + (Factor * atr(Pd))
+
+// get the trend
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1: close < TUp[1]? -1: nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+// plot the trend
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
+ 
+plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
+
+// Volume & RSI quality filter calculations
+// Rolling accumulated volume: sum over window, compare to its historical average
+vol_accum = sum(volume, vol_accum_bars)
+vol_accum_avg = sma(vol_accum, vol_avg_period)
+vol_is_low = vol_accum_avg > 0 ? (vol_accum / vol_accum_avg) * 100 < vol_threshold : false
+
+rsi_val = rsi(close, rsi_period)
+rsi_is_flat = rsi_val >= rsi_low and rsi_val <= rsi_high
+
+is_low_quality = filtermode == "Volume Only" ? vol_is_low :
+                 filtermode == "RSI Only" ? rsi_is_flat :
+                 (vol_is_low or rsi_is_flat)
+
+bgcolor(showquality and is_low_quality ? color.new(color.gray, 90) : na, title="Low Quality Zone")
+
+// check and plot the signals
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+show_buy = bsignal and showlabel and (not suppresssignals or not is_low_quality)
+show_sell = ssignal and showlabel and (not suppresssignals or not is_low_quality)
+plotshape(show_buy ? Trailingsl : na, title="Buy", text="Buy", location = location.absolute, style = shape.labelup, size = size.tiny, color = color.lime, textcolor = color.black, transp = 0)
+plotshape(show_sell ? Trailingsl : na, title="Sell", text="Sell", location = location.absolute, style = shape.labeldown, size = size.tiny, color = color.red, textcolor = color.white, transp = 0)
+
+//get S/R levels using Pivot Points
+float resistance = na
+float support = na
+support := pl ? pl : support[1]
+resistance := ph ? ph : resistance[1]
+
+// if enabled then show S/R levels
+plot(showsr and support ? support : na, color = showsr and support ? color.lime : na, style = plot.style_circles, offset = -prd)
+plot(showsr and resistance ? resistance : na, color = showsr and resistance ? color.red : na, style = plot.style_circles, offset = -prd)
+
+// alerts
+alertcondition(show_buy, title='Buy Signal', message='Buy Signal')
+alertcondition(show_sell, title='Sell Signal', message='Sell Signal')
+alertcondition(change(Trend), title='Trend Changed', message='Trend Changed')
+alertcondition(is_low_quality and not is_low_quality[1], title='Entered Low-Quality Zone', message='Entered Low-Quality Zone')
+alertcondition(not is_low_quality and is_low_quality[1], title='Exited Low-Quality Zone', message='Exited Low-Quality Zone')

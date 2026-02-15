@@ -12,6 +12,7 @@ import pandas as pd
 from src.data.oanda_client import OandaClient
 from src.indicators.ppst import compute_ppst
 from src.indicators.entry_circles import compute_entry_circles
+from src.indicators.volume_filter import compute_relative_volume
 from src.strategy.base_strategy import BaseStrategy
 from src.strategy.time_filter import compute_time_filter
 from src.strategy.position import Position
@@ -202,13 +203,19 @@ class PaperTrader:
         # Drop 'complete' column for indicator computation
         complete = complete.drop(columns=["complete"])
 
-        # Compute indicators
-        data = compute_ppst(complete, **self.ppst_params)
+        # Compute indicators (filter out volume_filter_period from ppst_params)
+        ppst_only = {k: v for k, v in self.ppst_params.items() if k != "volume_filter_period"}
+        data = compute_ppst(complete, **ppst_only)
 
         if self.use_circles:
             circles = compute_entry_circles(data)
             for col in circles.columns:
                 data[col] = circles[col].values
+
+        # Compute relative volume for volume filter
+        vol_period = self.ppst_params.get("volume_filter_period", 20)
+        if "volume" in complete.columns:
+            data["rel_volume"] = compute_relative_volume(complete["volume"].values, vol_period)
 
         tf = compute_time_filter(data["time"], **self.time_filter_params)
         data["can_trade"] = tf["can_trade"].values

@@ -2,33 +2,40 @@
 // © LonesomeTheBlue
 
 //@version=4
-strategy("PPST[OfficalBacktest]", overlay=true,
+strategy("PPST Signal Swing (No Circle)", overlay=true,
          default_qty_type=strategy.fixed,
          default_qty_value=10000,
          initial_capital=10000,
          currency=currency.USD,
          commission_type=strategy.commission.percent,
-         commission_value=0.01)
+         commission_value=0.01,
+         process_orders_on_close=true)
 prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
-Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
+Factor=input(defval = 4.5, title = "ATR Factor", minval = 1, step = 0.1)
 Pd=input(defval = 10, title = "ATR Period", minval=1)
 minrateu = input(defval = 1.0, title="Min profit Rate if Center Line Used", minval = 0)
 usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%")
 
+// === BACKTEST DATE RANGE ===
+useDateFilter = input(defval = true, title="Use Date Filter")
+startDate = input(defval = timestamp("01 Feb 2025 00:00"), title="Start Date", type=input.time)
+endDate = input(defval = timestamp("07 Feb 2026 23:59"), title="End Date", type=input.time)
+inDateRange = useDateFilter ? (time >= startDate and time <= endDate) : true
+
 // === POSITION SIZING ===
-useRiskBasedSizing = input(defval = false, title="Use Risk-Based Position Sizing")
-riskPercent = input(defval = 1.0, title="Risk Per Trade (% of Balance)", minval=0.1, step=0.1, tooltip="Dynamic risk: 1% of $10,000 = $100 risk per trade. Scales with equity.")
-minPositionSize = input(defval = 1000, title="Min Position Size (units)", minval=100)
-maxPositionSize = input(defval = 500000, title="Max Position Size (units)", minval=1000)
+useRiskBasedSizing = input(defval = true, title="Use Risk-Based Position Sizing")
+riskPercent = input(defval = 1.5, title="Risk Per Trade (% of Balance)", minval=0.1, step=0.1, tooltip="Dynamic risk: 1.5% of $10,000 = $150 risk per trade. Scales with equity.")
+maxPositionSize = input(defval = 2000000, title="Max Position Size (units)", minval=1000, tooltip="Cap for compound sizing. 2M ≈ $40K equity at 50:1 OANDA leverage.")
 
 // === SPREAD COST ===
 spreadPips = input(defval = 1.5, title="Spread Cost (pips)", minval=0, step=0.1)
 // Convert pips to price (1 pip = 10 points for 5-decimal forex)
-spreadPrice = spreadPips * syminfo.mintick * 10
+pipValue = syminfo.mintick * 10
+spreadPrice = spreadPips * pipValue
 
 // === TAKE PROFIT OPTIONS ===
-useRRTP = input(defval = false, title="Use RR-Based Take Profit")
-rrRatio = input(defval = 1.5, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
+useRRTP = input(defval = true, title="Use RR-Based Take Profit")
+rrRatio = input(defval = 2.0, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
 showTPLine = input(defval = true, title="Show TP Level Line")
 showpivot = input(defval = false, title="Show Pivot Points")
 showcl = input(defval = false, title="Show PP Center Line")
@@ -37,14 +44,14 @@ float minrate = minrateu / 100
 
 // === TIME FILTERS ===
 // Daily quiet window (no trading)
-useQuietWindow = input(defval = true, title="Use Daily Quiet Window")
+useQuietWindow = input(defval = false, title="Use Daily Quiet Window")
 quietStartHour = input(defval = 13, title="Quiet Window Start Hour (0-23)", minval=0, maxval=23)
 quietStartMin = input(defval = 30, title="Quiet Window Start Minute (0-59)", minval=0, maxval=59)
 quietEndHour = input(defval = 16, title="Quiet Window End Hour (0-23)", minval=0, maxval=23)
 quietEndMin = input(defval = 30, title="Quiet Window End Minute (0-59)", minval=0, maxval=59)
 
 // Market open window (Sunday 2pm to Friday 2pm PT)
-useMarketWindow = input(defval = true, title="Use Market Open Window")
+useMarketWindow = input(defval = false, title="Use Market Open Window")
 marketOpenDay = input(defval = 1, title="Market Open Day (1=Sun, 7=Sat)", minval=1, maxval=7)
 marketOpenHour = input(defval = 14, title="Market Open Hour", minval=0, maxval=23)
 marketCloseDay = input(defval = 6, title="Market Close Day (1=Sun, 7=Sat)", minval=1, maxval=7)
@@ -82,11 +89,19 @@ isMarketOpen() =>
         afterSundayOpen and beforeFridayClose and notWeekend
 
 // Combined filter: all conditions must be true to trade
-canTrade = notInQuietWindow and isMarketOpen()
+canTrade = notInQuietWindow and isMarketOpen() and inDateRange
 
 // Visual indicator for no-trade periods
 showNoTradeZones = input(defval = false, title="Show No-Trade Zones (Background)")
 bgcolor(showNoTradeZones and not canTrade ? color.new(color.gray, 90) : na, title="No Trade Zone")
+
+// === ENTRY DISTANCE FILTER ===
+maxEntryDist = input(defval = 20.0, title="Max Entry Distance from SuperTrend (Pips)", minval=1, step=0.5)
+
+// === BREAK-EVEN ===
+useBE = input(defval = true, title="Enable Break-Even")
+beTriggerPips = input(defval = 10.0, title="BE Trigger (Pips in Profit)", minval=5, step=1.0)
+beOffsetPips = input(defval = 1.0, title="BE Offset (Pips)", minval=0, step=0.5)
 
 float ph = na
 float pl = na
@@ -125,39 +140,35 @@ var float entrySL = na
 var float tpLevel = na
 var float entryPrice = na
 var int posDirection = 0  // 1 = long, -1 = short, 0 = flat
+var bool beTriggered = false
 
-// Detect new position entry (only track if RR TP is enabled)
-newLongEntry = useRRTP and strategy.position_size > 0 and strategy.position_size[1] <= 0
-newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_size[1] >= 0
+// Detect new position entry
+newLongEntry = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortEntry = strategy.position_size < 0 and strategy.position_size[1] >= 0
 
-// Current ATR value for risk calculation
+// Current ATR value for debug labels
 currentATR = atr(Pd)
 atrRisk = Factor * currentATR
-
-// Dynamic risk: % of current equity (compound sizing)
-riskPerTrade = strategy.equity * riskPercent / 100
-
-// Calculate position size based on risk
-// Position Size = Risk Amount / Stop Loss Distance
-calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : minPositionSize
-// Clamp to min/max limits
-positionSize = useRiskBasedSizing ? max(minPositionSize, min(maxPositionSize, calcPositionSize)) : na
 
 if newLongEntry
     // For LONG: Buy at ASK (mid + spread), SL is below entry, TP is above entry
     entryPrice := strategy.position_avg_price + spreadPrice  // Adjust for spread (buy at ask)
     entrySL := TUp  // SuperTrend lower band as SL
     slDistance = entryPrice - entrySL  // Actual risk distance (includes spread)
-    tpLevel := entryPrice + (slDistance * rrRatio)  // TP based on actual SL distance
+    if useRRTP and slDistance > 0
+        tpLevel := entryPrice + (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := 1
+    beTriggered := false
 
 if newShortEntry
     // For SHORT: Sell at BID (mid - spread), SL is above entry, TP is below entry
     entryPrice := strategy.position_avg_price - spreadPrice  // Adjust for spread (sell at bid)
     entrySL := TDown  // SuperTrend upper band as SL
     slDistance = entrySL - entryPrice  // Actual risk distance (includes spread)
-    tpLevel := entryPrice - (slDistance * rrRatio)  // TP based on actual SL distance
+    if useRRTP and slDistance > 0
+        tpLevel := entryPrice - (slDistance * rrRatio)  // TP based on actual SL distance
     posDirection := -1
+    beTriggered := false
 
 // Trail the SL with SuperTrend (only moves in favorable direction)
 if posDirection == 1 and strategy.position_size > 0
@@ -182,7 +193,7 @@ if newLongEntry and showDebugLabels
               "\nSL:" + tostring(entrySL, "#.#####") +
               "\nATR:" + tostring(currentATR, "#.#####") +
               "\nRisk$:" + tostring(atrRisk, "#.#####") +
-              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
+              (useRiskBasedSizing ? "\nSize:" + tostring(abs(strategy.position_size), "#") : ""),
               color=color.green, textcolor=color.white, size=size.small)
 if newShortEntry and showDebugLabels
     label.new(bar_index, low,
@@ -191,7 +202,7 @@ if newShortEntry and showDebugLabels
               "\nSL:" + tostring(entrySL, "#.#####") +
               "\nATR:" + tostring(currentATR, "#.#####") +
               "\nRisk$:" + tostring(atrRisk, "#.#####") +
-              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
+              (useRiskBasedSizing ? "\nSize:" + tostring(abs(strategy.position_size), "#") : ""),
               color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
 
 plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
@@ -228,17 +239,42 @@ plotshape(showBlockedSignals and ssignal and not onlylong and not canTrade,
 halfexited = false
 halfexited := nz(halfexited[1], false)
 
-// Entry logic - reversal strategy (entry in opposite direction auto-closes existing position)
+// Entry logic - reversal strategy with distance filter
 if bsignal and canTrade
-    if useRiskBasedSizing
-        strategy.entry("Buy", true, qty=positionSize, comment="Buy")
+    ep = close + spreadPrice  // spread-adjusted entry (ASK)
+    sl = TUp  // SuperTrend as SL
+    slDist = ep - sl
+    distPips = slDist / pipValue
+
+    if slDist > 0 and distPips <= maxEntryDist
+        if useRiskBasedSizing
+            riskAmt = strategy.equity * riskPercent / 100
+            qty = max(1.0, min(maxPositionSize, floor(riskAmt / slDist)))
+            strategy.entry("Buy", true, qty=qty, comment="Buy")
+        else
+            strategy.entry("Buy", true, comment="Buy")
     else
-        strategy.entry("Buy", true, comment="Buy")
+        // Distance filter blocked entry - still close opposite position on trend reversal
+        if strategy.position_size < 0
+            strategy.close("Sell", comment="Trend Rev")
+
 if ssignal and not onlylong and canTrade
-    if useRiskBasedSizing
-        strategy.entry("Sell", false, qty=positionSize, comment="Sell")
+    ep = close - spreadPrice  // spread-adjusted entry (BID)
+    sl = TDown  // SuperTrend as SL
+    slDist = sl - ep
+    distPips = slDist / pipValue
+
+    if slDist > 0 and distPips <= maxEntryDist
+        if useRiskBasedSizing
+            riskAmt = strategy.equity * riskPercent / 100
+            qty = max(1.0, min(maxPositionSize, floor(riskAmt / slDist)))
+            strategy.entry("Sell", false, qty=qty, comment="Sell")
+        else
+            strategy.entry("Sell", false, comment="Sell")
     else
-        strategy.entry("Sell", false, comment="Sell")
+        // Distance filter blocked entry - still close opposite position on trend reversal
+        if strategy.position_size > 0
+            strategy.close("Buy", comment="Trend Rev")
 
 // Close existing positions when entering quiet window
 // Fires on the first bar where quiet window becomes active
@@ -249,21 +285,37 @@ if enteringQuietWindow
     if strategy.position_size < 0
         strategy.close("Sell", comment="Quiet Close")
 
-// TP and SL exits (only active when useRRTP enabled)
-// These trigger BEFORE reversal if price reaches TP/SL level
-if useRRTP and not na(tpLevel) and not na(entrySL)
-    if posDirection == 1
-        strategy.exit("TP Long", "Buy", limit=tpLevel, comment="TP Hit")
-        strategy.exit("SL Long", "Buy", stop=entrySL, comment="SL Hit")
-    if posDirection == -1
-        strategy.exit("TP Short", "Sell", limit=tpLevel, comment="TP Hit")
-        strategy.exit("SL Short", "Sell", stop=entrySL, comment="SL Hit")
+// === BREAK-EVEN LOGIC ===
+if strategy.position_size != 0 and useBE and not beTriggered and not na(entryPrice)
+    profitPips = posDirection == 1 ? (close - entryPrice) / pipValue : (entryPrice - close) / pipValue
+    if profitPips >= beTriggerPips
+        beTriggered := true
+        bePrice = entryPrice + (posDirection * beOffsetPips * pipValue)
+        if posDirection == 1
+            entrySL := max(nz(entrySL), bePrice)
+        else
+            entrySL := min(nz(entrySL), bePrice)
 
-// Reset TP tracking when position closes
+// === EXIT ORDERS (combined SL + TP in single call) ===
+if not na(entrySL)
+    if posDirection == 1
+        if useRRTP and not na(tpLevel)
+            strategy.exit("Exit Long", "Buy", stop=entrySL, limit=tpLevel)
+        else
+            strategy.exit("Exit Long", "Buy", stop=entrySL)
+    if posDirection == -1
+        if useRRTP and not na(tpLevel)
+            strategy.exit("Exit Short", "Sell", stop=entrySL, limit=tpLevel)
+        else
+            strategy.exit("Exit Short", "Sell", stop=entrySL)
+
+// Reset tracking when position closes
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     tpLevel := na
     entrySL := na
+    entryPrice := na
     posDirection := 0
+    beTriggered := false
 
 cpsize = change(strategy.position_size)
 if change(strategy.position_size)

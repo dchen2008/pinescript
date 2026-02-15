@@ -1,0 +1,278 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LonesomeTheBlue
+
+//@version=4
+strategy("PPST[OfficalBacktest]", overlay=true,
+         default_qty_type=strategy.fixed,
+         default_qty_value=10000,
+         initial_capital=10000,
+         currency=currency.USD,
+         commission_type=strategy.commission.percent,
+         commission_value=0.01)
+prd = input(defval = 2, title="Pivot Point Period", minval = 1, maxval = 50)
+Factor=input(defval = 3, title = "ATR Factor", minval = 1, step = 0.1)
+Pd=input(defval = 10, title = "ATR Period", minval=1)
+minrateu = input(defval = 1.0, title="Min profit Rate if Center Line Used", minval = 0)
+usecenter = input(defval = false, title="Use Center Line to Close Entry for 50%")
+
+// === POSITION SIZING ===
+useRiskBasedSizing = input(defval = false, title="Use Risk-Based Position Sizing")
+riskPercent = input(defval = 1.0, title="Risk Per Trade (% of Balance)", minval=0.1, step=0.1, tooltip="Dynamic risk: 1% of $10,000 = $100 risk per trade. Scales with equity.")
+maxPositionSize = input(defval = 100000, title="Max Position Size (units)", minval=1000)
+
+// === SPREAD COST ===
+spreadPips = input(defval = 1.5, title="Spread Cost (pips)", minval=0, step=0.1)
+// Convert pips to price (1 pip = 10 points for 5-decimal forex)
+spreadPrice = spreadPips * syminfo.mintick * 10
+
+// === TAKE PROFIT OPTIONS ===
+useRRTP = input(defval = false, title="Use RR-Based Take Profit")
+rrRatio = input(defval = 1.5, title="Risk-Reward Ratio for TP", minval=0.1, step=0.1)
+showTPLine = input(defval = true, title="Show TP Level Line")
+showpivot = input(defval = false, title="Show Pivot Points")
+showcl = input(defval = false, title="Show PP Center Line")
+onlylong = input(defval = false, title="Enter Only Long Position")
+float minrate = minrateu / 100
+
+// === TIME FILTERS ===
+// Daily quiet window (no trading)
+useQuietWindow = input(defval = true, title="Use Daily Quiet Window")
+quietStartHour = input(defval = 13, title="Quiet Window Start Hour (0-23)", minval=0, maxval=23)
+quietStartMin = input(defval = 30, title="Quiet Window Start Minute (0-59)", minval=0, maxval=59)
+quietEndHour = input(defval = 16, title="Quiet Window End Hour (0-23)", minval=0, maxval=23)
+quietEndMin = input(defval = 30, title="Quiet Window End Minute (0-59)", minval=0, maxval=59)
+
+// Market open window (Sunday 2pm to Friday 2pm PT)
+useMarketWindow = input(defval = true, title="Use Market Open Window")
+marketOpenDay = input(defval = 1, title="Market Open Day (1=Sun, 7=Sat)", minval=1, maxval=7)
+marketOpenHour = input(defval = 14, title="Market Open Hour", minval=0, maxval=23)
+marketCloseDay = input(defval = 6, title="Market Close Day (1=Sun, 7=Sat)", minval=1, maxval=7)
+marketCloseHour = input(defval = 14, title="Market Close Hour", minval=0, maxval=23)
+
+// Time calculations (using PT timezone via exchange timezone or chart)
+currentHour = hour(time, "America/Los_Angeles")
+currentMin = minute(time, "America/Los_Angeles")
+currentDay = dayofweek(time, "America/Los_Angeles")
+
+// Convert to minutes since midnight for precise quiet window comparison
+currentTimeInMin = currentHour * 60 + currentMin
+quietStartInMin = quietStartHour * 60 + quietStartMin
+quietEndInMin = quietEndHour * 60 + quietEndMin
+
+// Check if NOT in quiet window (quiet window = no trading)
+// Uses minute precision for 13:30-16:30 style windows
+notInQuietWindow = (not useQuietWindow) or
+     (quietStartInMin < quietEndInMin ?
+      (currentTimeInMin < quietStartInMin or currentTimeInMin >= quietEndInMin) :
+      (currentTimeInMin >= quietEndInMin and currentTimeInMin < quietStartInMin))
+
+// Check if market is open (Sunday 2pm PT to Friday 2pm PT)
+// dayofweek: 1=Sunday, 2=Monday, ... 6=Friday, 7=Saturday
+isMarketOpen() =>
+    if not useMarketWindow
+        true
+    else
+        // After Sunday open hour
+        afterSundayOpen = (currentDay == marketOpenDay and currentHour >= marketOpenHour) or currentDay > marketOpenDay
+        // Before Friday close hour
+        beforeFridayClose = (currentDay == marketCloseDay and currentHour < marketCloseHour) or currentDay < marketCloseDay
+        // Not Saturday
+        notWeekend = currentDay != 7
+        afterSundayOpen and beforeFridayClose and notWeekend
+
+// Combined filter: all conditions must be true to trade
+canTrade = notInQuietWindow and isMarketOpen()
+
+// Visual indicator for no-trade periods
+showNoTradeZones = input(defval = false, title="Show No-Trade Zones (Background)")
+bgcolor(showNoTradeZones and not canTrade ? color.new(color.gray, 90) : na, title="No Trade Zone")
+
+float ph = na
+float pl = na
+ph := pivothigh(prd, prd)
+pl := pivotlow(prd, prd)
+
+plotshape(ph and showpivot, text="H",  style=shape.labeldown, color=na, textcolor=color.red, location=location.abovebar, offset = -prd)
+plotshape(pl and showpivot, text="L",  style=shape.labeldown, color=na, textcolor=color.lime, location=location.belowbar, offset = -prd)
+
+float center = na
+center := center[1]
+float lastpp = ph ? ph : pl ? pl : na
+if lastpp
+    if na(center)
+        center := lastpp
+    else
+        center := (center * 2 + lastpp) / 3
+
+Up = center - (Factor * atr(Pd))
+Dn = center + (Factor * atr(Pd))
+
+float TUp = na
+float TDown = na
+Trend = 0
+TUp := close[1] > TUp[1] ? max(Up, TUp[1]) : Up
+TDown := close[1] < TDown[1] ? min(Dn, TDown[1]) : Dn
+Trend := close > TDown[1] ? 1: close < TUp[1]? -1: nz(Trend[1], 1)
+Trailingsl = Trend == 1 ? TUp : TDown
+
+linecolor = Trend == 1 and nz(Trend[1]) == 1 ? color.lime : Trend == -1 and nz(Trend[1]) == -1 ? color.red : na
+plot(Trailingsl, color = linecolor ,  linewidth = 2, title = "PP SuperTrend")
+
+// === RR-BASED TP TRACKING ===
+// Track entry SL level and calculate TP
+var float entrySL = na
+var float tpLevel = na
+var float entryPrice = na
+var int posDirection = 0  // 1 = long, -1 = short, 0 = flat
+
+// Detect new position entry (only track if RR TP is enabled)
+newLongEntry = useRRTP and strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShortEntry = useRRTP and strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+// Current ATR value for risk calculation
+currentATR = atr(Pd)
+atrRisk = Factor * currentATR
+
+// Dynamic risk: % of current equity (compound sizing)
+riskPerTrade = strategy.equity * riskPercent / 100
+
+// Calculate position size based on risk
+// Position Size = Risk Amount / Stop Loss Distance
+calcPositionSize = atrRisk > 0 ? riskPerTrade / atrRisk : 0
+// Clamp to max safety limit
+positionSize = useRiskBasedSizing ? min(maxPositionSize, calcPositionSize) : na
+
+if newLongEntry
+    // For LONG: Buy at ASK (mid + spread), SL is below entry, TP is above entry
+    entryPrice := strategy.position_avg_price + spreadPrice  // Adjust for spread (buy at ask)
+    entrySL := TUp  // SuperTrend lower band as SL
+    slDistance = entryPrice - entrySL  // Actual risk distance (includes spread)
+    tpLevel := entryPrice + (slDistance * rrRatio)  // TP based on actual SL distance
+    posDirection := 1
+
+if newShortEntry
+    // For SHORT: Sell at BID (mid - spread), SL is above entry, TP is below entry
+    entryPrice := strategy.position_avg_price - spreadPrice  // Adjust for spread (sell at bid)
+    entrySL := TDown  // SuperTrend upper band as SL
+    slDistance = entrySL - entryPrice  // Actual risk distance (includes spread)
+    tpLevel := entryPrice - (slDistance * rrRatio)  // TP based on actual SL distance
+    posDirection := -1
+
+// Trail the SL with SuperTrend (only moves in favorable direction)
+if posDirection == 1 and strategy.position_size > 0
+    // LONG: Trail SL up with TUp (never down)
+    entrySL := max(entrySL, TUp)
+if posDirection == -1 and strategy.position_size < 0
+    // SHORT: Trail SL down with TDown (never up)
+    entrySL := min(entrySL, TDown)
+
+// Plot TP level and Entry SL for debugging
+plot(useRRTP and showTPLine and not na(tpLevel) ? tpLevel : na,
+     color=color.new(color.blue, 0), linewidth=2, style=plot.style_linebr, title="TP Level")
+plot(useRRTP and showTPLine and not na(entrySL) ? entrySL : na,
+     color=color.new(color.orange, 0), linewidth=1, style=plot.style_linebr, title="Entry SL Level")
+
+// Debug label on entry
+showDebugLabels = input(defval = false, title="Show TP Debug Labels")
+if newLongEntry and showDebugLabels
+    label.new(bar_index, high,
+              "LONG\nEntry:" + tostring(entryPrice, "#.#####") +
+              "\nTP:" + tostring(tpLevel, "#.#####") +
+              "\nSL:" + tostring(entrySL, "#.#####") +
+              "\nATR:" + tostring(currentATR, "#.#####") +
+              "\nRisk$:" + tostring(atrRisk, "#.#####") +
+              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
+              color=color.green, textcolor=color.white, size=size.small)
+if newShortEntry and showDebugLabels
+    label.new(bar_index, low,
+              "SHORT\nEntry:" + tostring(entryPrice, "#.#####") +
+              "\nTP:" + tostring(tpLevel, "#.#####") +
+              "\nSL:" + tostring(entrySL, "#.#####") +
+              "\nATR:" + tostring(currentATR, "#.#####") +
+              "\nRisk$:" + tostring(atrRisk, "#.#####") +
+              (useRiskBasedSizing ? "\nSize:" + tostring(positionSize, "#") : ""),
+              color=color.red, textcolor=color.white, size=size.small, style=label.style_label_up)
+
+plot(showcl ? center : na, color = showcl ? center < hl2 ? color.blue : color.red : na)
+
+bsignal = Trend == 1 and Trend[1] == -1
+ssignal = Trend == -1 and Trend[1] == 1
+
+// === SIGNAL VISUALIZATION ===
+showSignals = input(defval = true, title="Show BUY/SELL Signal Labels")
+
+// Plot BUY signal (green label below bar)
+plotshape(showSignals and bsignal and canTrade,
+          title="Buy Signal", text="BUY", textcolor=color.white,
+          style=shape.labelup, location=location.belowbar,
+          color=color.green, size=size.small)
+
+// Plot SELL signal (red label above bar)
+plotshape(showSignals and ssignal and not onlylong and canTrade,
+          title="Sell Signal", text="SELL", textcolor=color.white,
+          style=shape.labeldown, location=location.abovebar,
+          color=color.red, size=size.small)
+
+// Plot signals blocked by time filter (gray, optional)
+showBlockedSignals = input(defval = false, title="Show Blocked Signals (gray)")
+plotshape(showBlockedSignals and bsignal and not canTrade,
+          title="Blocked Buy", text="BUY", textcolor=color.gray,
+          style=shape.labelup, location=location.belowbar,
+          color=color.new(color.gray, 50), size=size.tiny)
+plotshape(showBlockedSignals and ssignal and not onlylong and not canTrade,
+          title="Blocked Sell", text="SELL", textcolor=color.gray,
+          style=shape.labeldown, location=location.abovebar,
+          color=color.new(color.gray, 50), size=size.tiny)
+
+halfexited = false
+halfexited := nz(halfexited[1], false)
+
+// Entry logic - reversal strategy (entry in opposite direction auto-closes existing position)
+if bsignal and canTrade
+    if useRiskBasedSizing
+        strategy.entry("Buy", true, qty=positionSize, comment="Buy")
+    else
+        strategy.entry("Buy", true, comment="Buy")
+if ssignal and not onlylong and canTrade
+    if useRiskBasedSizing
+        strategy.entry("Sell", false, qty=positionSize, comment="Sell")
+    else
+        strategy.entry("Sell", false, comment="Sell")
+
+// Close existing positions when entering quiet window
+// Fires on the first bar where quiet window becomes active
+enteringQuietWindow = useQuietWindow and not notInQuietWindow and nz(notInQuietWindow[1], true)
+if enteringQuietWindow
+    if strategy.position_size > 0
+        strategy.close("Buy", comment="Quiet Close")
+    if strategy.position_size < 0
+        strategy.close("Sell", comment="Quiet Close")
+
+// TP and SL exits (only active when useRRTP enabled)
+// These trigger BEFORE reversal if price reaches TP/SL level
+if useRRTP and not na(tpLevel) and not na(entrySL)
+    if posDirection == 1
+        strategy.exit("TP Long", "Buy", limit=tpLevel, comment="TP Hit")
+        strategy.exit("SL Long", "Buy", stop=entrySL, comment="SL Hit")
+    if posDirection == -1
+        strategy.exit("TP Short", "Sell", limit=tpLevel, comment="TP Hit")
+        strategy.exit("SL Short", "Sell", stop=entrySL, comment="SL Hit")
+
+// Reset TP tracking when position closes
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tpLevel := na
+    entrySL := na
+    posDirection := 0
+
+cpsize = change(strategy.position_size)
+if change(strategy.position_size)
+    if cpsize > 0 and strategy.position_size > 0 or cpsize< 0 and strategy.position_size < 0
+        halfexited := false
+    
+if strategy.position_size > 0 and center > hl2 and usecenter and not halfexited and close > strategy.position_avg_price * (1 + minrate)
+    strategy.close("Buy", qty_percent = 50, comment = "close buy for 50%")
+    halfexited := true
+if strategy.position_size < 0 and center < hl2 and usecenter and not halfexited and close < strategy.position_avg_price * (1 - minrate)
+    strategy.close("Sell", qty_percent = 50, comment = "close sell for 50%")
+    halfexited := true
+

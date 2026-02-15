@@ -19,12 +19,13 @@ from src.backtest.report import generate_report
 from src.strategy.ppst_signal import PPSTSignalStrategy
 from src.strategy.ppst_circle import PPSTCircleStrategy
 from src.strategy.vwap_mean_reversion import VWAPMeanReversionStrategy
+from src.strategy.hmts import HMTSStrategy
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run PPST backtest")
     parser.add_argument("--config", default="config/default.yaml", help="Config file path")
-    parser.add_argument("--strategy", choices=["signal", "circle", "vwap"], default="signal")
+    parser.add_argument("--strategy", choices=["signal", "circle", "vwap", "hmts"], default="signal")
     parser.add_argument("--instrument", default=None, help="Override instrument")
     parser.add_argument("--granularity", default=None, help="Override timeframe")
     parser.add_argument("--atr-factor", type=float, default=None, help="Override ATR factor")
@@ -95,6 +96,28 @@ def main():
             "rsi_period": vwap_cfg.get("rsi_period", 14),
         }
         rr = args.rr_ratio or vwap_cfg.get("tp_rr", 1.5)
+    elif args.strategy == "hmts":
+        hmts_cfg = config.get("hmts", {})
+        move_cfg = hmts_cfg.get("movement_req", {})
+        revert_cfg = hmts_cfg.get("revert_signal_req", {})
+        sl_cfg = hmts_cfg.get("hmts_sl", {})
+        tp_cfg = hmts_cfg.get("hmts_tp", {})
+        pos_cfg = hmts_cfg.get("position", {})
+        rr = args.rr_ratio or hmts_cfg.get("base_rr_ratio", 1.5)
+        strategy = HMTSStrategy(
+            movement_candles=move_cfg.get("num_candles", 10),
+            movement_pips=move_cfg.get("pips", 60.0),
+            revert_candles=revert_cfg.get("num_candles", 6),
+            revert_min_pips=revert_cfg.get("min_pips", 10.0),
+            revert_max_pips=revert_cfg.get("max_pips", 30.0),
+            hmts_tp_rr=tp_cfg.get("close_by_tp_rr", 7.0),
+            allow_second_entry=pos_cfg.get("allow_second_entry", True),
+            base_rr_ratio=rr,
+            trail_with_supertrend=hmts_cfg.get("trail_with_supertrend", True),
+            s1_sl_spread_buffer=sl_cfg.get("s1_init_sl_spread_buffer", True),
+            s2_revert_cross_limit=sl_cfg.get("s2_revert_cross_limit", 8.0),
+            spread_pips=config["spread_pips"],
+        )
     elif args.strategy == "signal":
         sig_cfg = config["signal_strategy"]
         rr = args.rr_ratio or sig_cfg["rr_ratio"]
