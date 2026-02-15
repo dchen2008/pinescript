@@ -378,7 +378,7 @@ def run_vol_backtest(
                 wcse2.disarm()
 
         # ── WCSE2 pattern detection + entry ──
-        if use_wcse2 and i >= warmup + 3 and wcse2.is_active(position is None):
+        if use_wcse2 and i >= warmup + 2 and wcse2.is_active(position is None):
             wcse2_entry_times = wcse2_params.get("entry_times", 0)
             if not wcse2.can_enter(wcse2_entry_times):
                 stats["wcse2_skip_limit"] += 1
@@ -396,19 +396,19 @@ def run_vol_backtest(
                         stats["wcse2_skip_vol"] += 1
 
                 if wcse2_vol_ok:
-                    # Extract last 4 bars of OHLC + ST values
-                    bars_4 = []
-                    st_vals_4 = []
-                    for k in range(3, -1, -1):  # i-3, i-2, i-1, i
+                    # Extract 3 bars: c1 (i-2), c2 (i-1), c3 (i)
+                    bars_3 = []
+                    st_vals_3 = []
+                    for k in range(2, -1, -1):  # i-2, i-1, i
                         r = data.iloc[i - k]
-                        bars_4.append((r["open"], r["high"], r["low"], r["close"]))
+                        bars_3.append((r["open"], r["high"], r["low"], r["close"]))
                         if wcse2.armed_dir == 1:
-                            st_vals_4.append(r["tup"])
+                            st_vals_3.append(r["tup"])
                         else:
-                            st_vals_4.append(r["tdown"])
+                            st_vals_3.append(r["tdown"])
 
                     pattern_match = detect_engulfing_near_st(
-                        bars_4, st_vals_4, wcse2.armed_dir,
+                        bars_3, st_vals_3, wcse2.armed_dir,
                         c_body_pips=wcse2_params.get("c_body_pips", 0.2),
                         c_wick_pips=wcse2_params.get("c_wick_pips", 5.0),
                         c_close_pips=wcse2_params.get("c_close_pips", 5.0),

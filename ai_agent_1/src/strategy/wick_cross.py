@@ -112,7 +112,7 @@ def detect_wick_cross_long(
 
 
 def detect_engulfing_near_st(
-    bars: list,        # [(o, h, l, c), ...] last 4 bars (i-3, i-2, i-1, i)
+    bars: list,        # [(o, h, l, c), ...] 3 bars: c1 (i-2), c2 (i-1), c3 (i)
     st_values: list,   # ST value for each bar (TUp for long, TDown for short)
     direction: int,    # 1=LONG, -1=SHORT
     c_body_pips: float = 0.2,
@@ -120,85 +120,74 @@ def detect_engulfing_near_st(
     c_close_pips: float = 5.0,
     engulf_body_pips: float = 1.0,
 ) -> bool:
-    """Detect engulfing pattern near SuperTrend (WCSE2).
+    """Detect 3-candle engulfing pattern near SuperTrend (WCSE2).
 
-    Looks for a 2-4 candle pattern where the last bar engulfs 1-3 preceding
-    small candles, at least one of which is near SuperTrend.
+    Fixed 3-candle pattern:
+    - c1 (i-2): any color, near SuperTrend (wick or close proximity)
+    - c2 (i-1): any color, body >= c_body_pips
+    - c3 (i):   engulfing candle — GREEN for LONG, RED for SHORT,
+                 body covers combined body range of c1+c2
 
     Args:
-        bars: Last 4 bars as (open, high, low, close) tuples.
-        st_values: SuperTrend value for each bar (TUp for long, TDown for short).
+        bars: 3 bars as (open, high, low, close) tuples: [c1, c2, c3].
+        st_values: SuperTrend value for each bar.
         direction: 1 for LONG (bullish engulfing near TUp), -1 for SHORT.
-        c_body_pips: Min body size for pre-engulfing candles (filters dojis).
-        c_wick_pips: Wick proximity to ST for c1 identification.
-        c_close_pips: Close proximity to ST for c1 identification.
-        engulf_body_pips: Min body size for the engulfing candle.
+        c_body_pips: Min body size for c1 and c2 (filters dojis).
+        c_wick_pips: c1 wick proximity to ST.
+        c_close_pips: c1 close proximity to ST.
+        engulf_body_pips: Min body size for c3 (engulfing candle).
 
     Returns:
-        True if an engulfing pattern near ST is detected.
+        True if the 3-candle engulfing pattern matches.
     """
     c_body_price = pips_to_price(c_body_pips)
     c_wick_price = pips_to_price(c_wick_pips)
     c_close_price = pips_to_price(c_close_pips)
     engulf_body_price = pips_to_price(engulf_body_pips)
 
-    # Last bar = potential engulfing candle
-    eng_o, eng_h, eng_l, eng_c = bars[-1]
+    c1_o, c1_h, c1_l, c1_c = bars[0]
+    c2_o, c2_h, c2_l, c2_c = bars[1]
+    c3_o, c3_h, c3_l, c3_c = bars[2]
+    st1 = st_values[0]
 
+    # --- c3: engulfing candle ---
     # Check color: GREEN for LONG, RED for SHORT
-    if direction == 1 and eng_c <= eng_o:
+    if direction == 1 and c3_c <= c3_o:
         return False
-    if direction == -1 and eng_c >= eng_o:
-        return False
-
-    # Check engulfing body size
-    eng_body = abs(eng_c - eng_o)
-    if eng_body < engulf_body_price:
+    if direction == -1 and c3_c >= c3_o:
         return False
 
-    eng_body_lo = min(eng_o, eng_c)
-    eng_body_hi = max(eng_o, eng_c)
+    # Check c3 body size
+    c3_body = abs(c3_c - c3_o)
+    if c3_body < engulf_body_price:
+        return False
 
-    # Try k=1,2,3 (engulf last 1, 2, or 3 bars before current)
-    for k in range(1, min(4, len(bars))):
-        pre_bars = bars[-(k + 1):-1]  # k bars before engulfing candle
-        pre_st = st_values[-(k + 1):-1]
+    # --- c1: near SuperTrend, body >= threshold ---
+    if abs(c1_c - c1_o) < c_body_price:
+        return False
 
-        # Check all pre-engulfing bars have body >= c_body_pips
-        all_body_ok = True
-        for o, h, l, c in pre_bars:
-            if abs(c - o) < c_body_price:
-                all_body_ok = False
-                break
-        if not all_body_ok:
-            continue
+    if direction == 1:
+        near_st = abs(c1_l - st1) <= c_wick_price or abs(c1_c - st1) <= c_close_price
+    else:
+        near_st = abs(c1_h - st1) <= c_wick_price or abs(c1_c - st1) <= c_close_price
+    if not near_st:
+        return False
 
-        # Check at least one bar is near ST (c1 identification)
-        has_near_st = False
-        for idx, (o, h, l, c) in enumerate(pre_bars):
-            st = pre_st[idx]
-            if direction == 1:
-                # LONG: check proximity to TUp (support)
-                if abs(l - st) <= c_wick_price or abs(c - st) <= c_close_price:
-                    has_near_st = True
-                    break
-            else:
-                # SHORT: check proximity to TDown (resistance)
-                if abs(h - st) <= c_wick_price or abs(c - st) <= c_close_price:
-                    has_near_st = True
-                    break
-        if not has_near_st:
-            continue
+    # --- c2: body >= threshold ---
+    if abs(c2_c - c2_o) < c_body_price:
+        return False
 
-        # Compute combined body range of pre-engulfing bars
-        combined_lo = min(min(o, c) for o, h, l, c in pre_bars)
-        combined_hi = max(max(o, c) for o, h, l, c in pre_bars)
+    # --- c3 body must cover combined body range of c1+c2 ---
+    combined_lo = min(min(c1_o, c1_c), min(c2_o, c2_c))
+    combined_hi = max(max(c1_o, c1_c), max(c2_o, c2_c))
 
-        # Check engulfing body covers combined range
-        if eng_body_lo <= combined_lo and eng_body_hi >= combined_hi:
-            return True
+    c3_body_lo = min(c3_o, c3_c)
+    c3_body_hi = max(c3_o, c3_c)
 
-    return False
+    if c3_body_lo > combined_lo or c3_body_hi < combined_hi:
+        return False
+
+    return True
 
 
 def detect_wick_cross_short(
