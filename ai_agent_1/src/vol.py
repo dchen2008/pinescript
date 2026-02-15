@@ -34,6 +34,8 @@ from src.strategy.wick_cross import (
     detect_wick_cross_long,
     detect_wick_cross_short,
     detect_engulfing_near_st,
+    detect_wcse1_setup,
+    check_stop_fill,
 )
 from src.utils.forex_utils import pips_to_price
 
@@ -177,6 +179,9 @@ def run_vol_backtest(
         "wcse_entries": 0,
         "wcse_skip_limit": 0,
         "wcse_skip_vol": 0,
+        "wcse_stop_gap_fills": 0,
+        "wcse_stop_normal_fills": 0,
+        "wcse_stop_unfilled": 0,
         "wcse2_armed": 0,
         "wcse2_patterns": 0,
         "wcse2_entries": 0,
@@ -193,6 +198,9 @@ def run_vol_backtest(
     use_wcse2 = wcse2_params is not None and wcse2_params.get("enabled", False)
     wcse2 = WickCrossState()
     wcse2_entry_info: list = []  # (entry_bar, entry_price, sl_price, direction, sl_dist)
+
+    # WCSE1 pending stop order (for stop order entry mode)
+    wcse1_pending_stop = None  # {direction, stop_price, sl, tp, units, placed_bar}
 
     # --- Bar-by-bar loop ---
     for i in range(warmup, n):
@@ -451,8 +459,73 @@ def run_vol_backtest(
                                 stats["traded"] += 1
                                 wcse2_entry_info.append((i, close, sl, w2_dir, sl_dist))
 
-        # ── WCSE arm/disarm ──
+        # ── WCSE1 pending stop fill ──
         wcse_entry = False
+        if wcse1_pending_stop is not None and position is None:
+            ps = wcse1_pending_stop
+            filled, fill_price = check_stop_fill(
+                (open_price, high, low, close),
+                ps["stop_price"],
+                ps["direction"],
+            )
+            if filled:
+                if fill_price == open_price and fill_price != ps["stop_price"]:
+                    stats["wcse_stop_gap_fills"] += 1
+                else:
+                    stats["wcse_stop_normal_fills"] += 1
+                # Apply spread to fill price
+                if ps["direction"] == 1:
+                    spread_entry = fill_price + portfolio.spread_price
+                else:
+                    spread_entry = fill_price - portfolio.spread_price
+                # Recompute SL distance from actual fill price (may differ for gap fills)
+                sl_dist_actual = abs(spread_entry - ps["sl"])
+                if sl_dist_actual > 0:
+                    # Recompute TP from actual fill
+                    wcse_tp_rr = wcse_params.get("tp_rr", 2.0)
+                    tp_actual = spread_entry + ps["direction"] * sl_dist_actual * wcse_tp_rr
+                    # Recompute position size from actual SL distance
+                    units_actual = portfolio.compute_position_size(sl_dist_actual)
+                    if units_actual > 0:
+                        position = Position(
+                            direction=ps["direction"],
+                            entry_price=fill_price,
+                            units=units_actual,
+                            sl_price=ps["sl"],
+                            tp_price=tp_actual,
+                            entry_bar=i,
+                            entry_time=str(row["time"]),
+                            entry_source="wcse",
+                        )
+                        wcse_entry = True
+                        stats["wcse_entries"] += 1
+                        stats["traded"] += 1
+                        wcse_entry_info.append((i, fill_price, ps["sl"], ps["direction"], sl_dist_actual))
+
+                        # Same-bar SL/TP check (stop filled mid-bar)
+                        sb_sl_hit = position.check_sl_hit(high, low)
+                        sb_tp_hit = position.check_tp_hit(high, low)
+                        if sb_sl_hit and sb_tp_hit:
+                            pnl = position.close_position(position.sl_price, "SL Hit", i)
+                            portfolio.record_trade(pnl)
+                            trade_log.append(position.to_dict())
+                            position = None
+                        elif sb_sl_hit:
+                            pnl = position.close_position(position.sl_price, "SL Hit", i)
+                            portfolio.record_trade(pnl)
+                            trade_log.append(position.to_dict())
+                            position = None
+                        elif sb_tp_hit:
+                            wcse.record_tp_hit()
+                            pnl = position.close_position(position.tp_price, "TP Hit", i)
+                            portfolio.record_trade(pnl)
+                            trade_log.append(position.to_dict())
+                            position = None
+            if not filled:
+                stats["wcse_stop_unfilled"] += 1
+            wcse1_pending_stop = None  # 1-bar validity: always clear
+
+        # ── WCSE arm/disarm ──
         if use_wcse:
             # Arm on vol-filtered signal during matching trend
             if buy_raw and is_vol_filtered and trend == 1:
@@ -470,8 +543,8 @@ def run_vol_backtest(
             if wcse.armed_dir == -1 and trend != -1:
                 wcse.disarm()
 
-        # ── WCSE pattern detection + entry ──
-        if not wcse2_entry and use_wcse and i >= warmup + 2 and wcse.is_active(position is None):
+        # ── WCSE1 setup detection → set pending stop for next bar ──
+        if not wcse2_entry and use_wcse and i >= warmup + 1 and wcse.is_active(position is None):
             wcse_entry_times = wcse_params.get("entry_times", 0)
             if not wcse.can_enter(wcse_entry_times):
                 stats["wcse_skip_limit"] += 1
@@ -489,91 +562,59 @@ def run_vol_backtest(
                         stats["wcse_skip_vol"] += 1
 
                 if wcse_vol_ok:
-                    row_m2 = data.iloc[i - 2]
-                    row_m1 = data.iloc[i - 1]
-                    pattern_match = False
+                    row_m1 = data.iloc[i - 1]  # c1
+                    # c2 is current bar (fully closed in backtest)
+                    wcse_dir = wcse.armed_dir
 
-                    if wcse.armed_dir == 1:
-                        pattern_match = detect_wick_cross_long(
-                            row_m2["open"], row_m2["high"], row_m2["low"], row_m2["close"], row_m2["tup"],
-                            row_m1["open"], row_m1["high"], row_m1["low"], row_m1["close"], row_m1["tup"],
-                            open_price, close,
-                            c1_body_pips=wcse_params.get("c1_body_pips", 3.0),
-                            c1_wick_pips=wcse_params.get("c1_wick_pips", 0.5),
-                            c1_close_pips=wcse_params.get("c1_close_pips", 1.0),
-                            c2_body_pips=wcse_params.get("c2_body_pips", 2.0),
-                            c2_wick_pips=wcse_params.get("c2_wick_pips", 0.5),
-                            c2_close_pips=wcse_params.get("c2_close_pips", 1.0),
-                        )
-                    elif wcse.armed_dir == -1:
-                        pattern_match = detect_wick_cross_short(
-                            row_m2["open"], row_m2["high"], row_m2["low"], row_m2["close"], row_m2["tdown"],
-                            row_m1["open"], row_m1["high"], row_m1["low"], row_m1["close"], row_m1["tdown"],
-                            open_price, close,
-                            c1_body_pips=wcse_params.get("c1_body_pips", 3.0),
-                            c1_wick_pips=wcse_params.get("c1_wick_pips", 0.5),
-                            c1_close_pips=wcse_params.get("c1_close_pips", 1.0),
-                            c2_body_pips=wcse_params.get("c2_body_pips", 2.0),
-                            c2_wick_pips=wcse_params.get("c2_wick_pips", 0.5),
-                            c2_close_pips=wcse_params.get("c2_close_pips", 1.0),
-                        )
+                    if wcse_dir == 1:
+                        c1_st = row_m1["tup"]
+                        c2_st = tup
+                    else:
+                        c1_st = row_m1["tdown"]
+                        c2_st = tdown
 
-                    if pattern_match:
+                    valid, breakout_level = detect_wcse1_setup(
+                        (row_m1["open"], row_m1["high"], row_m1["low"], row_m1["close"]),
+                        (open_price, high, low, close),
+                        c1_st, c2_st, wcse_dir,
+                        c1_body_pips=wcse_params.get("c1_body_pips", 3.0),
+                        c1_wick_pips=wcse_params.get("c1_wick_pips", 0.5),
+                        c1_close_pips=wcse_params.get("c1_close_pips", 1.0),
+                        c2_body_pips=wcse_params.get("c2_body_pips", 2.0),
+                        c2_wick_pips=wcse_params.get("c2_wick_pips", 0.5),
+                        c2_close_pips=wcse_params.get("c2_close_pips", 1.0),
+                    )
+
+                    if valid:
                         stats["wcse_patterns"] += 1
-                        wcse_dir = wcse.armed_dir
+                        stop_buffer = pips_to_price(wcse_params.get("stop_buffer_pips", 0.3))
+                        stop_price = breakout_level + wcse_dir * stop_buffer
+
+                        # Compute SL/TP using c2's SuperTrend (current bar)
                         wcse_sl_buffer = pips_to_price(wcse_params.get("sl_buffer_pips", 0.0))
                         wcse_tp_rr = wcse_params.get("tp_rr", 2.0)
 
                         if wcse_dir == 1:
-                            # LONG: entry at open, SL at TUp
-                            spread_entry = open_price + portfolio.spread_price
                             sl = tup - wcse_sl_buffer
+                            spread_entry = stop_price + portfolio.spread_price
                             sl_dist = spread_entry - sl
                         else:
-                            # SHORT: entry at open, SL at TDown
-                            spread_entry = open_price - portfolio.spread_price
                             sl = tdown + wcse_sl_buffer
+                            spread_entry = stop_price - portfolio.spread_price
                             sl_dist = sl - spread_entry
 
                         if sl_dist > 0:
                             tp = spread_entry + wcse_dir * sl_dist * wcse_tp_rr
                             units = portfolio.compute_position_size(sl_dist)
                             if units > 0:
-                                position = Position(
-                                    direction=wcse_dir,
-                                    entry_price=open_price,
-                                    units=units,
-                                    sl_price=sl,
-                                    tp_price=tp,
-                                    entry_bar=i,
-                                    entry_time=str(row["time"]),
-                                    entry_source="wcse",
-                                )
-                                wcse_entry = True
-                                stats["wcse_entries"] += 1
-                                stats["traded"] += 1
-                                wcse_entry_info.append((i, open_price, sl, wcse_dir, sl_dist))
-
-                                # Same-bar SL/TP check (entry at open, bar may hit SL/TP)
-                                sb_sl_hit = position.check_sl_hit(high, low)
-                                sb_tp_hit = position.check_tp_hit(high, low)
-                                if sb_sl_hit and sb_tp_hit:
-                                    # Conservative: assume SL hit first
-                                    pnl = position.close_position(position.sl_price, "SL Hit", i)
-                                    portfolio.record_trade(pnl)
-                                    trade_log.append(position.to_dict())
-                                    position = None
-                                elif sb_sl_hit:
-                                    pnl = position.close_position(position.sl_price, "SL Hit", i)
-                                    portfolio.record_trade(pnl)
-                                    trade_log.append(position.to_dict())
-                                    position = None
-                                elif sb_tp_hit:
-                                    wcse.record_tp_hit()
-                                    pnl = position.close_position(position.tp_price, "TP Hit", i)
-                                    portfolio.record_trade(pnl)
-                                    trade_log.append(position.to_dict())
-                                    position = None
+                                wcse1_pending_stop = {
+                                    "direction": wcse_dir,
+                                    "stop_price": stop_price,
+                                    "sl": sl,
+                                    "tp": tp,
+                                    "units": units,
+                                    "placed_bar": i,
+                                }
 
         # ── Execute buy signal ──
         if not wcse2_entry and not wcse_entry and buy_signal and (position is None or (position is not None and position.is_short)):
@@ -743,6 +784,10 @@ def print_filter_stats(stats: dict, vol_params: dict, quiet_params: dict,
         print(f"  WCSE Entries:    {stats.get('wcse_entries', 0)}")
         print(f"  WCSE Skip Limit: {stats.get('wcse_skip_limit', 0)}")
         print(f"  WCSE Skip Vol:   {stats.get('wcse_skip_vol', 0)}")
+        gap = stats.get('wcse_stop_gap_fills', 0)
+        normal = stats.get('wcse_stop_normal_fills', 0)
+        unfilled = stats.get('wcse_stop_unfilled', 0)
+        print(f"  WCSE Stop Fills: {gap + normal} (gap: {gap}, normal: {normal}, unfilled: {unfilled})")
 
 
 def print_wcse_mfe(wcse_mfe_rrs: list) -> None:
@@ -793,8 +838,8 @@ def build_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--atr-period", type=int, default=10)
 
     # Volume filter
-    parser.add_argument("--vol-sma", type=int, default=30, help="Volume SMA period")
-    parser.add_argument("--vol-threshold", type=float, default=1.0, help="Min vol ratio")
+    parser.add_argument("--vol-sma", type=int, default=None, help="Volume SMA period")
+    parser.add_argument("--vol-threshold", type=float, default=None, help="Min vol ratio")
     parser.add_argument("--vol-recovery", type=int, default=0, help="Vol recovery bars (0=off)")
     parser.add_argument("--filtered-exit", type=int, default=0, help="Filtered exit bars (0=off)")
     parser.add_argument("--no-vol-filter", action="store_true", help="Disable volume filter")
@@ -839,6 +884,7 @@ def build_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wcse-c2-close", type=float, default=None, help="2nd candle close proximity pips")
     parser.add_argument("--wcse-tp-rr", type=float, default=None, help="TP risk:reward ratio")
     parser.add_argument("--wcse-sl-buffer", type=float, default=None, help="SL buffer pips")
+    parser.add_argument("--wcse-stop-buffer", type=float, default=None, help="Stop order buffer pips above/below c2 extreme")
     parser.add_argument("--wcse-vf-skip", action="store_true", help="Skip vol filter for WCSE")
     parser.add_argument("--wcse-vf-threshold", type=float, default=None, help="Alt vol threshold")
 
@@ -872,10 +918,20 @@ def build_params(args) -> Tuple[dict, dict, dict, dict, dict, dict, dict]:
         "atr_period": args.atr_period,
     }
 
+    # Load config yaml for volume filter defaults
+    config = {}
+    config_path = getattr(args, 'config', 'config/default.yaml')
+    try:
+        with open(config_path) as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        pass
+    vf_cfg = config.get('volume_filter', {})
+
     vol_params = {
         "use_vol_filter": not args.no_vol_filter,
-        "vol_sma_period": args.vol_sma,
-        "vol_threshold": args.vol_threshold,
+        "vol_sma_period": args.vol_sma if args.vol_sma is not None else vf_cfg.get("sma_period", 20),
+        "vol_threshold": args.vol_threshold if args.vol_threshold is not None else vf_cfg.get("threshold", 1.6),
         "vol_recovery_bars": args.vol_recovery,
         "filtered_exit_bars": args.filtered_exit,
     }
@@ -905,14 +961,7 @@ def build_params(args) -> Tuple[dict, dict, dict, dict, dict, dict, dict]:
         "spread_pips": args.spread,
     }
 
-    # Load WCSE from config yaml, override with CLI args
-    config = {}
-    config_path = getattr(args, 'config', 'config/default.yaml')
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        pass
+    # Load WCSE from config yaml (reuse config loaded above), override with CLI args
     wcse_cfg = config.get('wcse', {})
 
     wcse_params = {
@@ -926,6 +975,7 @@ def build_params(args) -> Tuple[dict, dict, dict, dict, dict, dict, dict]:
         "c2_close_pips": args.wcse_c2_close if args.wcse_c2_close is not None else wcse_cfg.get("c2_close_pips", 1.0),
         "tp_rr": args.wcse_tp_rr if args.wcse_tp_rr is not None else wcse_cfg.get("tp_rr", 2.0),
         "sl_buffer_pips": args.wcse_sl_buffer if args.wcse_sl_buffer is not None else wcse_cfg.get("sl_buffer_pips", 0.0),
+        "stop_buffer_pips": args.wcse_stop_buffer if args.wcse_stop_buffer is not None else wcse_cfg.get("stop_buffer_pips", 0.3),
         "vf_skip": args.wcse_vf_skip if args.wcse_vf_skip else wcse_cfg.get("vf_skip", False),
         "vf_threshold": args.wcse_vf_threshold if args.wcse_vf_threshold is not None else wcse_cfg.get("vf_threshold", 3.0),
     }
@@ -973,7 +1023,7 @@ def main():
     close_mode = "swing" if args.swing_close else f"tp{args.tp_type}"
     label = args.label or (
         f"vol_{args.granularity}_atr{args.atr_factor}"
-        f"_sma{args.vol_sma}_vf{args.vol_threshold}"
+        f"_sma{vol_params['vol_sma_period']}_vf{vol_params['vol_threshold']}"
         f"_sl{args.sl_buffer}_r{args.risk}"
         f"_{close_mode}"
     )

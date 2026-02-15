@@ -37,19 +37,25 @@ sizing:
 # Spread
 spread_pips: 1.5
 
+# Volume Filter (for vol strategy signals)
+volume_filter:
+  sma_period: 20             # SMA lookback for relative volume (optimized from 30)
+  threshold: 1.6             # Min vol ratio to allow signal entry (optimized from 1.0)
+
 # Wick Cross SuperTrend Entry (WCSE)
 # Alternative entry on vol-filtered signals via 3-candle pullback pattern
 wcse:
   enabled: false
-  entry_times: 2           # Max TP exits per swing (0=unlimited)
-  c1_body_pips: 1.0        # 1st candle min body size
+  entry_times: 1           # Max TP exits per swing (0=unlimited)
+  c1_body_pips: 1.3        # 1st candle min body size
   c1_wick_pips: 5.0        # 1st candle wick proximity to ST
   c1_close_pips: 5.0       # 1st candle close proximity to ST
   c2_body_pips: 0.5        # 2nd candle min body size
-  c2_wick_pips: 5.0        # 2nd candle wick proximity to ST
-  c2_close_pips: 5.0       # 2nd candle close proximity to ST
-  tp_rr: 4.0               # TP risk:reward ratio
+  c2_wick_pips: 7.0        # 2nd candle wick proximity to ST
+  c2_close_pips: 7.0       # 2nd candle close proximity to ST
+  tp_rr: 1.2               # TP risk:reward ratio
   sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
+  stop_buffer_pips: 0.5    # Buffer above c2.high for buy stop (below c2.low for sell stop)
   vf_skip: true            # Skip vol filter for WCSE entries
   vf_threshold: 3.0         # Alt vol threshold (when vf_skip=false)
 
@@ -59,8 +65,8 @@ wcse2:
   enabled: false
   entry_times: 2           # Max TP exits per swing (0=unlimited)
   c_body_pips: 0.2         # Pre-engulfing candle min body size
-  c_wick_pips: 5.0         # c1 wick proximity to ST
-  c_close_pips: 5.0        # c1 close proximity to ST
+  c_wick_pips: 3.0         # c1 wick proximity to ST
+  c_close_pips: 3.0        # c1 close proximity to ST
   engulf_body_pips: 1.0    # Engulfing candle min body size
   tp_rr: 4.0               # TP risk:reward ratio
   sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
@@ -165,7 +171,7 @@ monitor:
   gain_protect_risk: 0.75
 
 # Best Configuration Summary (from optimization):
-# Strategy: M1 Nth Circle
-# ATR Factor: 5.0, ATR Period: 10, Pivot Period: 2
-# Risk: 15%, RR Ratio: 2.0, No Quiet Window
-# Results: $10K -> $1,023,228, Avg Weekly: +34.97%, 2352 trades, 52.34% WR, PF: 1.29
+# Strategy: M5 Vol + WCSE1 Stop Order (config #5)
+# VT=1.6, SMA=20, Buf=0.5, RR=1.2, ET=1, C1B=1.3, C2B=0.5
+# C1W=5.0, C1C=5.0, C2W=7.0, C2C=7.0, Risk=1%, Spread=1.5
+# Results: $10K -> $17,157 (+71.6%), Max DD 7.5%, Sharpe 5.90, PF 1.36, 392 trades

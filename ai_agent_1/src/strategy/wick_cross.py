@@ -190,6 +190,143 @@ def detect_engulfing_near_st(
     return True
 
 
+def detect_wcse1_setup(
+    c1_ohlc: tuple,    # (open, high, low, close) — bar i-1 (fully closed)
+    c2_ohlc: tuple,    # (open, high, low, close) — bar i   (fully closed)
+    c1_st: float,      # TUp (long) or TDown (short) at c1
+    c2_st: float,      # TUp (long) or TDown (short) at c2
+    direction: int,    # 1=LONG, -1=SHORT
+    c1_body_pips: float = 3.0,
+    c1_wick_pips: float = 0.5,
+    c1_close_pips: float = 1.0,
+    c2_body_pips: float = 2.0,
+    c2_wick_pips: float = 0.5,
+    c2_close_pips: float = 1.0,
+) -> tuple:
+    """Validate c1+c2 pullback-rejection setup for WCSE1 stop order entry.
+
+    Unlike detect_wick_cross_long/short, this does NOT check c3 color.
+    Instead it returns the breakout level (c2.high for LONG, c2.low for SHORT)
+    so a stop order can be placed for the next bar.
+
+    Args:
+        c1_ohlc: 1st candle OHLC (RED for long, GREEN for short).
+        c2_ohlc: 2nd candle OHLC (GREEN for long, RED for short).
+        c1_st: SuperTrend value at c1 (TUp for long, TDown for short).
+        c2_st: SuperTrend value at c2.
+        direction: 1=LONG, -1=SHORT.
+        c1/c2 body/wick/close pips: pattern thresholds.
+
+    Returns:
+        (valid, breakout_level): valid=True if setup matches,
+        breakout_level = c2.high (long) or c2.low (short).
+    """
+    c1_body_price = pips_to_price(c1_body_pips)
+    c1_wick_price = pips_to_price(c1_wick_pips)
+    c1_close_price = pips_to_price(c1_close_pips)
+    c2_body_price = pips_to_price(c2_body_pips)
+    c2_wick_price = pips_to_price(c2_wick_pips)
+    c2_close_price = pips_to_price(c2_close_pips)
+
+    o1, h1, l1, c1 = c1_ohlc
+    o2, h2, l2, c2 = c2_ohlc
+
+    if direction == 1:
+        # --- LONG setup ---
+        # c1: RED, body >= threshold
+        if c1 >= o1:
+            return (False, 0.0)
+        if (o1 - c1) < c1_body_price:
+            return (False, 0.0)
+
+        # c1 touch/cross TUp
+        touch_b = (l1 >= c1_st) and ((l1 - c1_st) <= c1_wick_price or abs(c1 - c1_st) <= c1_close_price)
+        cross_c = (l1 < c1_st) and (c1 > c1_st)
+        if not (touch_b or cross_c):
+            return (False, 0.0)
+
+        # c2: GREEN, body >= threshold
+        if c2 <= o2:
+            return (False, 0.0)
+        if (c2 - o2) < c2_body_price:
+            return (False, 0.0)
+
+        # c2 touch TUp (no cross below)
+        touch_2 = (l2 >= c2_st) and ((l2 - c2_st) <= c2_wick_price or abs(c2 - c2_st) <= c2_close_price)
+        if not touch_2:
+            return (False, 0.0)
+        if l2 < c2_st:
+            return (False, 0.0)
+
+        return (True, h2)
+
+    else:
+        # --- SHORT setup ---
+        # c1: GREEN, body >= threshold
+        if c1 <= o1:
+            return (False, 0.0)
+        if (c1 - o1) < c1_body_price:
+            return (False, 0.0)
+
+        # c1 touch/cross TDown
+        touch_b = (h1 <= c1_st) and ((c1_st - h1) <= c1_wick_price or abs(c1 - c1_st) <= c1_close_price)
+        cross_c = (h1 > c1_st) and (c1 < c1_st)
+        if not (touch_b or cross_c):
+            return (False, 0.0)
+
+        # c2: RED, body >= threshold
+        if c2 >= o2:
+            return (False, 0.0)
+        if (o2 - c2) < c2_body_price:
+            return (False, 0.0)
+
+        # c2 touch TDown (no cross above)
+        touch_2 = (h2 <= c2_st) and ((c2_st - h2) <= c2_wick_price or abs(c2 - c2_st) <= c2_close_price)
+        if not touch_2:
+            return (False, 0.0)
+        if h2 > c2_st:
+            return (False, 0.0)
+
+        return (True, l2)
+
+
+def check_stop_fill(
+    bar_ohlc: tuple,     # (open, high, low, close)
+    stop_price: float,
+    direction: int,      # 1=buy stop, -1=sell stop
+) -> tuple:
+    """Check if a stop order would fill on this bar.
+
+    Buy stop: triggers when price rises TO or ABOVE stop_price.
+    Sell stop: triggers when price falls TO or BELOW stop_price.
+
+    Args:
+        bar_ohlc: (open, high, low, close) of the bar.
+        stop_price: The stop order price level.
+        direction: 1 for buy stop, -1 for sell stop.
+
+    Returns:
+        (filled, fill_price): filled=True if stop triggered,
+        fill_price = open (gap) or stop_price (normal).
+    """
+    o, h, l, c = bar_ohlc
+
+    if direction == 1:
+        # Buy stop: triggers at or above stop_price
+        if o >= stop_price:
+            return (True, o)  # gap fill at open
+        if h >= stop_price:
+            return (True, stop_price)
+        return (False, 0.0)
+    else:
+        # Sell stop: triggers at or below stop_price
+        if o <= stop_price:
+            return (True, o)  # gap fill at open
+        if l <= stop_price:
+            return (True, stop_price)
+        return (False, 0.0)
+
+
 def detect_wick_cross_short(
     o2: float, h2: float, l2: float, c2: float, tdown2: float,
     o1: float, h1: float, l1: float, c1: float, tdown1: float,
