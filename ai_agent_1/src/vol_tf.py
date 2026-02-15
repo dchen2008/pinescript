@@ -23,6 +23,8 @@ from src.vol import (
     build_params,
     parse_time,
     print_filter_stats,
+    print_wcse_mfe,
+    print_wcse2_mfe,
 )
 
 
@@ -38,7 +40,7 @@ def main():
 
     args = parser.parse_args()
 
-    ppst_params, vol_params, quiet_params, strategy_params, sizing_params, wcse_params = build_params(args)
+    ppst_params, vol_params, quiet_params, strategy_params, sizing_params, wcse_params, wcse2_params = build_params(args)
 
     # Entry window params
     etw_start = parse_time(args.etw_start)
@@ -62,6 +64,7 @@ def main():
         df, ppst_params, vol_params, quiet_params, strategy_params, sizing_params,
         entry_window_params=entry_window_params,
         wcse_params=wcse_params,
+        wcse2_params=wcse2_params,
     )
 
     # Generate report
@@ -78,7 +81,10 @@ def main():
         df["time"], sizing_params["initial_capital"], label,
     )
 
-    print_filter_stats(result["stats"], vol_params, quiet_params, entry_window_params, wcse_params=wcse_params)
+    print_filter_stats(result["stats"], vol_params, quiet_params, entry_window_params,
+                       wcse_params=wcse_params, wcse2_params=wcse2_params)
+    print_wcse2_mfe(result.get("wcse2_mfe_rrs", []))
+    print_wcse_mfe(result.get("wcse_mfe_rrs", []))
 
     print(f"\nFiles saved to: results/")
     for name, path in report["files"].items():

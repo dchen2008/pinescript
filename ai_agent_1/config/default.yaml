@@ -53,6 +53,20 @@ wcse:
   vf_skip: true            # Skip vol filter for WCSE entries
   vf_threshold: 3.0         # Alt vol threshold (when vf_skip=false)
 
+# Wick Cross SuperTrend Entry 2 (WCSE2)
+# Engulfing pattern near SuperTrend — runs alongside WCSE1
+wcse2:
+  enabled: false
+  entry_times: 2           # Max TP exits per swing (0=unlimited)
+  c_body_pips: 0.2         # Pre-engulfing candle min body size
+  c_wick_pips: 5.0         # c1 wick proximity to ST
+  c_close_pips: 5.0        # c1 close proximity to ST
+  engulf_body_pips: 1.0    # Engulfing candle min body size
+  tp_rr: 4.0               # TP risk:reward ratio
+  sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
+  vf_skip: true            # Skip vol filter for WCSE2 entries
+  vf_threshold: 3.0        # Alt vol threshold (when vf_skip=false)
+
 # Signal Strategy (ppst_official_bt) - baseline, not recommended
 signal_strategy:
   use_rr_tp: true

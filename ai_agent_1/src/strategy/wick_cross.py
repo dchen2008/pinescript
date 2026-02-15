@@ -111,6 +111,96 @@ def detect_wick_cross_long(
     return True
 
 
+def detect_engulfing_near_st(
+    bars: list,        # [(o, h, l, c), ...] last 4 bars (i-3, i-2, i-1, i)
+    st_values: list,   # ST value for each bar (TUp for long, TDown for short)
+    direction: int,    # 1=LONG, -1=SHORT
+    c_body_pips: float = 0.2,
+    c_wick_pips: float = 5.0,
+    c_close_pips: float = 5.0,
+    engulf_body_pips: float = 1.0,
+) -> bool:
+    """Detect engulfing pattern near SuperTrend (WCSE2).
+
+    Looks for a 2-4 candle pattern where the last bar engulfs 1-3 preceding
+    small candles, at least one of which is near SuperTrend.
+
+    Args:
+        bars: Last 4 bars as (open, high, low, close) tuples.
+        st_values: SuperTrend value for each bar (TUp for long, TDown for short).
+        direction: 1 for LONG (bullish engulfing near TUp), -1 for SHORT.
+        c_body_pips: Min body size for pre-engulfing candles (filters dojis).
+        c_wick_pips: Wick proximity to ST for c1 identification.
+        c_close_pips: Close proximity to ST for c1 identification.
+        engulf_body_pips: Min body size for the engulfing candle.
+
+    Returns:
+        True if an engulfing pattern near ST is detected.
+    """
+    c_body_price = pips_to_price(c_body_pips)
+    c_wick_price = pips_to_price(c_wick_pips)
+    c_close_price = pips_to_price(c_close_pips)
+    engulf_body_price = pips_to_price(engulf_body_pips)
+
+    # Last bar = potential engulfing candle
+    eng_o, eng_h, eng_l, eng_c = bars[-1]
+
+    # Check color: GREEN for LONG, RED for SHORT
+    if direction == 1 and eng_c <= eng_o:
+        return False
+    if direction == -1 and eng_c >= eng_o:
+        return False
+
+    # Check engulfing body size
+    eng_body = abs(eng_c - eng_o)
+    if eng_body < engulf_body_price:
+        return False
+
+    eng_body_lo = min(eng_o, eng_c)
+    eng_body_hi = max(eng_o, eng_c)
+
+    # Try k=1,2,3 (engulf last 1, 2, or 3 bars before current)
+    for k in range(1, min(4, len(bars))):
+        pre_bars = bars[-(k + 1):-1]  # k bars before engulfing candle
+        pre_st = st_values[-(k + 1):-1]
+
+        # Check all pre-engulfing bars have body >= c_body_pips
+        all_body_ok = True
+        for o, h, l, c in pre_bars:
+            if abs(c - o) < c_body_price:
+                all_body_ok = False
+                break
+        if not all_body_ok:
+            continue
+
+        # Check at least one bar is near ST (c1 identification)
+        has_near_st = False
+        for idx, (o, h, l, c) in enumerate(pre_bars):
+            st = pre_st[idx]
+            if direction == 1:
+                # LONG: check proximity to TUp (support)
+                if abs(l - st) <= c_wick_price or abs(c - st) <= c_close_price:
+                    has_near_st = True
+                    break
+            else:
+                # SHORT: check proximity to TDown (resistance)
+                if abs(h - st) <= c_wick_price or abs(c - st) <= c_close_price:
+                    has_near_st = True
+                    break
+        if not has_near_st:
+            continue
+
+        # Compute combined body range of pre-engulfing bars
+        combined_lo = min(min(o, c) for o, h, l, c in pre_bars)
+        combined_hi = max(max(o, c) for o, h, l, c in pre_bars)
+
+        # Check engulfing body covers combined range
+        if eng_body_lo <= combined_lo and eng_body_hi >= combined_hi:
+            return True
+
+    return False
+
+
 def detect_wick_cross_short(
     o2: float, h2: float, l2: float, c2: float, tdown2: float,
     o1: float, h1: float, l1: float, c1: float, tdown1: float,

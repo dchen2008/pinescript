@@ -24,7 +24,7 @@ class Position:
     close_reason: Optional[str] = None
     close_bar: Optional[int] = None
     pnl: float = 0.0
-    entry_source: str = "signal"  # "signal" or "wcse"
+    entry_source: str = "signal"  # "signal", "wcse", or "wcse2"
 
     def __post_init__(self):
         if self.original_sl is None:
