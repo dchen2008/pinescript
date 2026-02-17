@@ -56,7 +56,7 @@ i_units = input.int(10000, "Fixed Position Size (Units)", group=strat_group, min
 i_max_position = input.int(500000, "Max Position Size (Units)", group=strat_group, minval=1000, step=50000,
      tooltip="Safety cap. 500K ≈ $10K equity at 50:1 OANDA leverage", display=display.none)
 i_spread_pips = input.float(1.5, "Spread (Pips)", group=strat_group, minval=0, step=0.1, display=display.none)
-i_sl_buffer = input.float(2.0, "SL Buffer (Pips)", group=strat_group, minval=0, step=0.5,
+i_sl_buffer = input.float(0.0, "SL Buffer (Pips)", group=strat_group, minval=0, step=0.5,
      tooltip="Added below SuperTrend for LONG SL, above for SHORT SL", display=display.none)
 i_tp_type = input.string("Risk Ratio", "TP Type", options=["Risk Ratio", "Fixed Pips", "None"], group=strat_group, display=display.none)
 i_tp_ratio = input.float(2.0, "TP Risk:Reward Ratio", group=strat_group, minval=0.5, step=0.1, display=display.none)
@@ -71,16 +71,13 @@ i_wcse_only = input.bool(false, "WCSE Only (disable signal entries)", group=wcse
      tooltip="When true, all signals arm WCSE — only WCSE pattern entries fire", display=display.none)
 i_wcse_entry_times = input.int(1, "Max TP Exits Per Swing", minval=0, group=wcse_group,
      tooltip="0=unlimited. Only TP exits count; SL exits are free retries", display=display.none)
-i_wcse_c1_body = input.float(1.3, "C1 Min Body (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c1_wick = input.float(5.0, "C1 Wick Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c1_close = input.float(5.0, "C1 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_body = input.float(0.5, "C2 Min Body (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_wick = input.float(7.0, "C2 Wick Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_close = input.float(7.0, "C2 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
+i_wcse_c1_body = input.float(0.2, "C1 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
+i_wcse_c1_close = input.float(2.5, "C1 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
+i_wcse_c2_body = input.float(0.2, "C2 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
+i_wcse_wick_cross = input.float(1.5, "Wick Cross Min (pips)", group=wcse_group, minval=0, step=0.5,
+     tooltip="Min wick depth through SuperTrend for Pattern C (wick cross)", display=display.none)
 i_wcse_tp_rr = input.float(1.2, "TP Risk:Reward", group=wcse_group, minval=0.5, step=0.5, display=display.none)
 i_wcse_sl_buffer = input.float(0.0, "SL Buffer (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_stop_buffer = input.float(0.5, "Stop Buffer (pips)", group=wcse_group, minval=0, step=0.1,
-     tooltip="Buffer above C2.high (long) or below C2.low (short) for stop order entry", display=display.none)
 
 // Display
 disp_group = "Display"
@@ -132,41 +129,66 @@ plot(Trailingsl, color=linecolor, linewidth=2, title="PP SuperTrend", display=di
 bsignal = Trend == 1 and Trend[1] == -1
 ssignal = Trend == -1 and Trend[1] == 1
 
-// ── WCSE 2-Candle Setup Detection (for stop order entry) ──
-// C1 = approach candle near ST, C2 = rejection candle → stop above/below C2 extreme
-detect_wcse_setup_long(c1_body_p, c1_wick_p, c1_close_p, c2_body_p, c2_wick_p, c2_close_p) =>
-    // C1 (bar [1]): RED, body >= threshold, wick touches/crosses TUp
+// ── WCSE Pattern A: 2-Candle Engulfing ──
+detect_wcse_engulf_long(c1_close_p, c1_body_p, c2_body_p) =>
     c1_red = close[1] < open[1]
     c1_body = open[1] - close[1]
     c1_body_ok = c1_body >= pips_to_price(c1_body_p)
-    c1_touch = (low[1] >= TUp[1]) and ((low[1] - TUp[1]) <= pips_to_price(c1_wick_p) or math.abs(close[1] - TUp[1]) <= pips_to_price(c1_close_p))
-    c1_cross = (low[1] < TUp[1]) and (close[1] > TUp[1])
-    c1_ok = c1_red and c1_body_ok and (c1_touch or c1_cross)
-    // C2 (bar [0]): GREEN, body >= threshold, touch TUp, no cross
+    c1_close_ok = math.abs(close[1] - TUp[1]) <= pips_to_price(c1_close_p)
     c2_green = close > open
     c2_body = close - open
     c2_body_ok = c2_body >= pips_to_price(c2_body_p)
-    c2_touch = (low >= TUp) and ((low - TUp) <= pips_to_price(c2_wick_p) or math.abs(close - TUp) <= pips_to_price(c2_close_p))
-    c2_no_cross = low >= TUp
-    c2_ok = c2_green and c2_body_ok and c2_touch and c2_no_cross
-    [c1_ok and c2_ok, high]  // breakout = C2.high
+    c2_engulfs = c2_body > c1_body
+    c1_red and c1_body_ok and c1_close_ok and c2_green and c2_body_ok and c2_engulfs
 
-detect_wcse_setup_short(c1_body_p, c1_wick_p, c1_close_p, c2_body_p, c2_wick_p, c2_close_p) =>
-    // C1 (bar [1]): GREEN, body >= threshold, wick touches/crosses TDown
+detect_wcse_engulf_short(c1_close_p, c1_body_p, c2_body_p) =>
     c1_green = close[1] > open[1]
     c1_body = close[1] - open[1]
     c1_body_ok = c1_body >= pips_to_price(c1_body_p)
-    c1_touch = (high[1] <= TDown[1]) and ((TDown[1] - high[1]) <= pips_to_price(c1_wick_p) or math.abs(close[1] - TDown[1]) <= pips_to_price(c1_close_p))
-    c1_cross = (high[1] > TDown[1]) and (close[1] < TDown[1])
-    c1_ok = c1_green and c1_body_ok and (c1_touch or c1_cross)
-    // C2 (bar [0]): RED, body >= threshold, touch TDown, no cross
+    c1_close_ok = math.abs(close[1] - TDown[1]) <= pips_to_price(c1_close_p)
     c2_red = close < open
     c2_body = open - close
     c2_body_ok = c2_body >= pips_to_price(c2_body_p)
-    c2_touch = (high <= TDown) and ((TDown - high) <= pips_to_price(c2_wick_p) or math.abs(close - TDown) <= pips_to_price(c2_close_p))
-    c2_no_cross = high <= TDown
-    c2_ok = c2_red and c2_body_ok and c2_touch and c2_no_cross
-    [c1_ok and c2_ok, low]  // breakout = C2.low
+    c2_engulfs = c2_body > c1_body
+    c1_green and c1_body_ok and c1_close_ok and c2_red and c2_body_ok and c2_engulfs
+
+// ── WCSE Pattern B: 3-Candle Engulfing ──
+detect_wcse_engulf_long_3(c1_close_p, c1_body_p, c2_body_p) =>
+    c1_red = close[2] < open[2]
+    c1_body = open[2] - close[2]
+    c1_body_ok = c1_body >= pips_to_price(c1_body_p)
+    c1_close_ok = math.abs(close[2] - TUp[2]) <= pips_to_price(c1_close_p)
+    c3_green = close > open
+    c3_body = close - open
+    c3_body_ok = c3_body >= pips_to_price(c2_body_p)
+    net_move = close - open[1]
+    c1_red and c1_body_ok and c1_close_ok and c3_green and c3_body_ok and net_move > c1_body
+
+detect_wcse_engulf_short_3(c1_close_p, c1_body_p, c2_body_p) =>
+    c1_green = close[2] > open[2]
+    c1_body = close[2] - open[2]
+    c1_body_ok = c1_body >= pips_to_price(c1_body_p)
+    c1_close_ok = math.abs(close[2] - TDown[2]) <= pips_to_price(c1_close_p)
+    c3_red = close < open
+    c3_body = open - close
+    c3_body_ok = c3_body >= pips_to_price(c2_body_p)
+    net_move = open[1] - close
+    c1_green and c1_body_ok and c1_close_ok and c3_red and c3_body_ok and net_move > c1_body
+
+// ── WCSE Pattern C: Wick Cross SuperTrend ──
+detect_wcse_wick_cross_long(wick_cross_p) =>
+    is_green = close > open
+    wick_below = low < TUp
+    wick_depth = TUp - low >= pips_to_price(wick_cross_p)
+    close_above = close > TUp
+    is_green and wick_below and wick_depth and close_above
+
+detect_wcse_wick_cross_short(wick_cross_p) =>
+    is_red = close < open
+    wick_above = high > TDown
+    wick_depth = high - TDown >= pips_to_price(wick_cross_p)
+    close_below = close < TDown
+    is_red and wick_above and wick_depth and close_below
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VOLUME FILTER CALCULATION
@@ -275,12 +297,6 @@ var int wcse_entry_source = 0   // 0=signal, 1=wcse (tracks current position sou
 var int wcse_armed_count = 0    // stats: total arm events
 var int wcse_entry_count = 0    // stats: total WCSE entries
 var int wcse_skip_count = 0     // stats: pattern matched but entry skipped (sl_dist <= 0)
-// ── WCSE Pending Stop Order State ──
-var int wcse_pending_dir = 0      // 1=buy stop pending, -1=sell stop pending, 0=none
-var int wcse_pending_bar = 0      // bar_index when stop was placed
-var float wcse_pending_ep = na    // stop entry price
-var float wcse_pending_sl = na    // planned SL
-var float wcse_pending_tp = na    // planned TP
 
 // ── WCSE Auto-Arm (always armed in current trend direction) ──
 if i_wcse_enabled
@@ -301,9 +317,26 @@ if i_wcse_enabled
 buy_signal = (bsignal and not is_filtered) or deferred_buy
 sell_signal = (ssignal and not is_filtered) or deferred_sell
 
-// ── WCSE Setup Detection (unconditional for series consistency) ──
-[_wcse_setup_long, _wcse_long_breakout] = detect_wcse_setup_long(i_wcse_c1_body, i_wcse_c1_wick, i_wcse_c1_close, i_wcse_c2_body, i_wcse_c2_wick, i_wcse_c2_close)
-[_wcse_setup_short, _wcse_short_breakout] = detect_wcse_setup_short(i_wcse_c1_body, i_wcse_c1_wick, i_wcse_c1_close, i_wcse_c2_body, i_wcse_c2_wick, i_wcse_c2_close)
+// ── WCSE Pattern Detection (unconditional for series consistency) ──
+_engulf_long = detect_wcse_engulf_long(i_wcse_c1_close, i_wcse_c1_body, i_wcse_c2_body)
+_engulf_short = detect_wcse_engulf_short(i_wcse_c1_close, i_wcse_c1_body, i_wcse_c2_body)
+_engulf_long_3 = detect_wcse_engulf_long_3(i_wcse_c1_close, i_wcse_c1_body, i_wcse_c2_body)
+_engulf_short_3 = detect_wcse_engulf_short_3(i_wcse_c1_close, i_wcse_c1_body, i_wcse_c2_body)
+_wick_cross_long = detect_wcse_wick_cross_long(i_wcse_wick_cross)
+_wick_cross_short = detect_wcse_wick_cross_short(i_wcse_wick_cross)
+
+// ── WCSE Volume Check Helpers ──
+// Pattern A (2-candle): check [bar[2], bar[1], bar[0]]
+wcse_vol_ok_2(vt) =>
+    not use_vol_filter or vol_ratio[2] >= vt or vol_ratio[1] >= vt or vol_ratio >= vt
+
+// Pattern B (3-candle): check [bar[3], bar[2], bar[1], bar[0]]
+wcse_vol_ok_3(vt) =>
+    not use_vol_filter or vol_ratio[3] >= vt or vol_ratio[2] >= vt or vol_ratio[1] >= vt or vol_ratio >= vt
+
+// Pattern C (1-candle): check [bar[1], bar[0]]
+wcse_vol_ok_1(vt) =>
+    not use_vol_filter or vol_ratio[1] >= vt or vol_ratio >= vt
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // POSITION MANAGEMENT
@@ -361,67 +394,14 @@ entered_this_bar = false
 // Snapshot entry source BEFORE entries modify it (for trade close TP tracking)
 int closing_entry_source = wcse_entry_source
 
-// ── WCSE Pending Stop Fill Detection ──
+// ── WCSE Close-Price Entry vars ──
 wcse_buy_entry = false
 wcse_sell_entry = false
-wcse_vol_fail = false
-
-if wcse_pending_dir != 0
-    // Cancel on trend flip (also handles swing close bars)
-    if (wcse_pending_dir == 1 and Trend != 1) or (wcse_pending_dir == -1 and Trend != -1)
-        if wcse_pending_dir == 1
-            strategy.cancel("Long")
-        else
-            strategy.cancel("Short")
-        wcse_pending_dir := 0
-    // Check if stop order filled (position appeared in our direction)
-    else if (wcse_pending_dir == 1 and strategy.position_size > 0) or (wcse_pending_dir == -1 and strategy.position_size < 0)
-        // Vol check at fill time: any of [3],[2],[1],[0] meets threshold
-        wcse_fill_vol_ok = not use_vol_filter
-        if use_vol_filter
-            wcse_fill_vol_ok := vol_ratio[3] >= vol_threshold or vol_ratio[2] >= vol_threshold or vol_ratio[1] >= vol_threshold or vol_ratio >= vol_threshold
-        if wcse_fill_vol_ok
-            entered_this_bar := true
-            wcse_entry_source := 1
-            // Use actual fill price from strategy when available
-            if strategy.opentrades > 0
-                entry_price := strategy.opentrades.entry_price(0)
-            else
-                entry_price := wcse_pending_ep
-            sl_price := wcse_pending_sl
-            original_sl := sl_price
-            // Recalculate TP from actual entry price
-            float wcse_fill_dist = wcse_pending_dir == 1 ? (entry_price - sl_price) : (sl_price - entry_price)
-            tp_price := wcse_pending_dir == 1 ? (entry_price + wcse_fill_dist * i_wcse_tp_rr) : (entry_price - wcse_fill_dist * i_wcse_tp_rr)
-            position_dir := wcse_pending_dir
-            wcse_entry_count := wcse_entry_count + 1
-            if wcse_pending_dir == 1
-                wcse_buy_entry := true
-                strategy.exit("Long Exit", "Long", stop=sl_price, limit=tp_price)
-            else
-                wcse_sell_entry := true
-                strategy.exit("Short Exit", "Short", stop=sl_price, limit=tp_price)
-        else
-            // Vol check failed — close position immediately
-            wcse_vol_fail := true
-            if wcse_pending_dir == 1
-                strategy.close("Long", comment="WC Vol Fail")
-            else
-                strategy.close("Short", comment="WC Vol Fail")
-            wcse_skip_count := wcse_skip_count + 1
-        wcse_pending_dir := 0
-    // Not filled — cancel (1-bar validity)
-    else if bar_index > wcse_pending_bar
-        if wcse_pending_dir == 1
-            strategy.cancel("Long")
-        else
-            strategy.cancel("Short")
-        wcse_pending_dir := 0
+wcse_pattern_name = ""
 
 if buy_signal and strategy.position_size <= 0 and not i_wcse_only
     // Enter LONG from flat or reverse from SHORT
     // Skip if already LONG (after filtered SELL → position continues with trailing SL)
-    wcse_pending_dir := 0  // Signal entry takes priority, replaces any pending stop
     entered_this_bar := true
     wcse_entry_source := 0
     entry_price := close + pips_to_price(i_spread_pips)
@@ -449,7 +429,6 @@ if buy_signal and strategy.position_size <= 0 and not i_wcse_only
 if sell_signal and strategy.position_size >= 0 and not i_wcse_only
     // Enter SHORT from flat or reverse from LONG
     // Skip if already SHORT (after filtered BUY → position continues with trailing SL)
-    wcse_pending_dir := 0  // Signal entry takes priority, replaces any pending stop
     entered_this_bar := true
     wcse_entry_source := 0
     entry_price := close - pips_to_price(i_spread_pips)
@@ -474,57 +453,97 @@ if sell_signal and strategy.position_size >= 0 and not i_wcse_only
     position_dir := -1
     strategy.entry("Short", strategy.short, qty=qty)
 
-// ── WCSE Setup Detection → Stop Order Placement ──
-// Detect 2-candle setup (C1 approach + C2 rejection), place buy/sell stop above/below C2 extreme
-// Stop fills on next bar if price breaks through; cancelled after 1 bar if not filled
-wcse_setup_long = false
-wcse_setup_short = false
-
-if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and wcse_pending_dir == 0 and not entered_this_bar
+// ── WCSE Close-Price Entry ──
+if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and not entered_this_bar
     can_enter = i_wcse_entry_times == 0 or wcse_tp_exits < i_wcse_entry_times
     if can_enter and not is_quiet
-        if wcse_armed_dir == 1 and _wcse_setup_long
-            float stop_price = _wcse_long_breakout + pips_to_price(i_wcse_stop_buffer) + pips_to_price(i_spread_pips)
-            float wcse_sl = TUp - pips_to_price(i_wcse_sl_buffer)
-            float wcse_dist = stop_price - wcse_sl
-            if wcse_dist > 0
-                float wcse_tp = stop_price + wcse_dist * i_wcse_tp_rr
-                float qty = i_units
-                if i_sizing_mode == "Compound Risk %"
-                    risk_amount = strategy.equity * i_risk_percent / 100
-                    qty := math.floor(risk_amount / wcse_dist)
-                    qty := math.min(qty, i_max_position)
-                    qty := math.max(qty, 1)
-                strategy.entry("Long", strategy.long, stop=stop_price, qty=qty)
-                wcse_pending_dir := 1
-                wcse_pending_bar := bar_index
-                wcse_pending_ep := stop_price
-                wcse_pending_sl := wcse_sl
-                wcse_pending_tp := wcse_tp
-                wcse_setup_long := true
+        wcse_matched = false
+        wcse_dir = wcse_armed_dir
+        wcse_vol_pass = false
+
+        // Priority: A (2-candle engulf) > B (3-candle engulf) > C (wick cross)
+        if not wcse_matched and wcse_dir == 1 and _engulf_long
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_2(vol_threshold)
+            wcse_pattern_name := "E2↑"
+        if not wcse_matched and wcse_dir == -1 and _engulf_short
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_2(vol_threshold)
+            wcse_pattern_name := "E2↓"
+        if not wcse_matched and wcse_dir == 1 and _engulf_long_3
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_3(vol_threshold)
+            wcse_pattern_name := "E3↑"
+        if not wcse_matched and wcse_dir == -1 and _engulf_short_3
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_3(vol_threshold)
+            wcse_pattern_name := "E3↓"
+        if not wcse_matched and wcse_dir == 1 and _wick_cross_long
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_1(vol_threshold)
+            wcse_pattern_name := "WX↑"
+        if not wcse_matched and wcse_dir == -1 and _wick_cross_short
+            wcse_matched := true
+            wcse_vol_pass := wcse_vol_ok_1(vol_threshold)
+            wcse_pattern_name := "WX↓"
+
+        if wcse_matched and wcse_vol_pass
+            float wcse_sl_buf = pips_to_price(i_wcse_sl_buffer)
+            if wcse_dir == 1
+                entry_price := close + pips_to_price(i_spread_pips)
+                sl_price := TUp - wcse_sl_buf
+                original_sl := sl_price
+                sl_dist = entry_price - sl_price
+                if sl_dist > 0
+                    if i_tp_type == "Risk Ratio"
+                        tp_price := entry_price + (sl_dist * i_wcse_tp_rr)
+                    else if i_tp_type == "Fixed Pips"
+                        tp_price := entry_price + pips_to_price(i_tp_pips)
+                    else
+                        tp_price := na
+                    float qty = i_units
+                    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+                        risk_amount = strategy.equity * i_risk_percent / 100
+                        qty := math.floor(risk_amount / sl_dist)
+                        qty := math.min(qty, i_max_position)
+                        qty := math.max(qty, 1)
+                    position_dir := 1
+                    entered_this_bar := true
+                    wcse_entry_source := 1
+                    wcse_entry_count := wcse_entry_count + 1
+                    wcse_buy_entry := true
+                    strategy.entry("Long", strategy.long, qty=qty)
+                else
+                    wcse_skip_count := wcse_skip_count + 1
             else
-                wcse_skip_count := wcse_skip_count + 1
-        else if wcse_armed_dir == -1 and _wcse_setup_short
-            float stop_price = _wcse_short_breakout - pips_to_price(i_wcse_stop_buffer) - pips_to_price(i_spread_pips)
-            float wcse_sl = TDown + pips_to_price(i_wcse_sl_buffer)
-            float wcse_dist = wcse_sl - stop_price
-            if wcse_dist > 0
-                float wcse_tp = stop_price - wcse_dist * i_wcse_tp_rr
-                float qty = i_units
-                if i_sizing_mode == "Compound Risk %"
-                    risk_amount = strategy.equity * i_risk_percent / 100
-                    qty := math.floor(risk_amount / wcse_dist)
-                    qty := math.min(qty, i_max_position)
-                    qty := math.max(qty, 1)
-                strategy.entry("Short", strategy.short, stop=stop_price, qty=qty)
-                wcse_pending_dir := -1
-                wcse_pending_bar := bar_index
-                wcse_pending_ep := stop_price
-                wcse_pending_sl := wcse_sl
-                wcse_pending_tp := wcse_tp
-                wcse_setup_short := true
-            else
-                wcse_skip_count := wcse_skip_count + 1
+                entry_price := close - pips_to_price(i_spread_pips)
+                sl_price := TDown + wcse_sl_buf
+                original_sl := sl_price
+                sl_dist = sl_price - entry_price
+                if sl_dist > 0
+                    if i_tp_type == "Risk Ratio"
+                        tp_price := entry_price - (sl_dist * i_wcse_tp_rr)
+                    else if i_tp_type == "Fixed Pips"
+                        tp_price := entry_price - pips_to_price(i_tp_pips)
+                    else
+                        tp_price := na
+                    float qty = i_units
+                    if i_sizing_mode == "Compound Risk %" and sl_dist > 0
+                        risk_amount = strategy.equity * i_risk_percent / 100
+                        qty := math.floor(risk_amount / sl_dist)
+                        qty := math.min(qty, i_max_position)
+                        qty := math.max(qty, 1)
+                    position_dir := -1
+                    entered_this_bar := true
+                    wcse_entry_source := 1
+                    wcse_entry_count := wcse_entry_count + 1
+                    wcse_sell_entry := true
+                    strategy.entry("Short", strategy.short, qty=qty)
+                else
+                    wcse_skip_count := wcse_skip_count + 1
+
+        if wcse_matched and not wcse_vol_pass
+            wcse_skip_count := wcse_skip_count + 1
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SUPERTREND TRAILING STOP
@@ -654,17 +673,9 @@ plotshape(deferred_sell and showlabel ? Trailingsl : na, title="Vol Recovery Sel
      location=location.absolute, style=shape.labeldown, size=size.tiny,
      color=color.new(color.red, 30), textcolor=color.white, display=display.pane)
 
-// WCSE setup detected — stop order placed (small marker on setup bar)
-plotshape(wcse_setup_long and showlabel ? TUp : na, title="WCSE Setup Long", text="WC↑",
-     location=location.absolute, style=shape.labelup, size=size.tiny,
-     color=color.new(color.aqua, 50), textcolor=color.new(color.black, 30), display=display.pane)
-plotshape(wcse_setup_short and showlabel ? TDown : na, title="WCSE Setup Short", text="WC↓",
-     location=location.absolute, style=shape.labeldown, size=size.tiny,
-     color=color.new(color.fuchsia, 50), textcolor=color.new(color.white, 30), display=display.pane)
-
-// WCSE stop filled + vol ok (actual entries on fill bar) with EP/SL/TP info
+// WCSE close-price entry with pattern name + EP/SL/TP info
 if wcse_buy_entry and showlabel
-    wcse_info = "WC Buy\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
+    wcse_info = wcse_pattern_name + "\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
     label.new(bar_index, TUp, wcse_info,
          style=label.style_label_up, size=size.small,
          color=color.aqua, textcolor=color.black)
@@ -672,18 +683,13 @@ if wcse_buy_entry and showlabel
          style=label.style_label_left, size=size.tiny,
          color=color.new(color.green, 30), textcolor=color.white)
 if wcse_sell_entry and showlabel
-    wcse_info = "WC Sell\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
+    wcse_info = wcse_pattern_name + "\nEP:" + str.tostring(entry_price, "#.#####") + "\nSL:" + str.tostring(sl_price, "#.#####") + "\nTP:" + str.tostring(tp_price, "#.#####")
     label.new(bar_index, TDown, wcse_info,
          style=label.style_label_down, size=size.small,
          color=color.fuchsia, textcolor=color.white)
     label.new(bar_index, tp_price, "TP " + str.tostring(tp_price, "#.#####"),
          style=label.style_label_left, size=size.tiny,
          color=color.new(color.red, 30), textcolor=color.white)
-
-// WCSE stop filled but vol check failed
-plotshape(wcse_vol_fail and showlabel, title="WCSE Vol Fail", text="WC\nVol",
-     location=location.abovebar, style=shape.xcross, size=size.tiny,
-     color=color.new(color.orange, 30), textcolor=color.orange, display=display.pane)
 
 // Filtered exit (delayed close after countdown)
 plotshape(filtered_exit_now and filtered_exit_dir == 1 and show_vol_filter, title="Filtered Exit Short", text="FX",
@@ -859,11 +865,6 @@ if show_stats and barstate.islast
         table.cell(stats_table, 1, row, wcse_mode, text_color=color.aqua, text_size=size.small)
         row := row + 1
 
-        table.cell(stats_table, 0, row, "WCSE Armed", text_color=color.black, text_size=size.small)
-        wcse_arm_info = str.tostring(wcse_armed_count) + (wcse_armed_dir == 1 ? " (LONG)" : wcse_armed_dir == -1 ? " (SHORT)" : "")
-        table.cell(stats_table, 1, row, wcse_arm_info, text_color=wcse_armed_count > 0 ? color.aqua : color.gray, text_size=size.small)
-        row := row + 1
-
         table.cell(stats_table, 0, row, "WCSE Entries", text_color=color.black, text_size=size.small)
         table.cell(stats_table, 1, row, str.tostring(wcse_entry_count) + (wcse_skip_count > 0 ? " (" + str.tostring(wcse_skip_count) + " skip)" : ""), text_color=wcse_entry_count > 0 ? color.aqua : color.gray, text_size=size.small)
         row := row + 1
@@ -873,5 +874,5 @@ if show_stats and barstate.islast
         row := row + 1
 
         table.cell(stats_table, 0, row, "WCSE Settings", text_color=color.black, text_size=size.small)
-        wcse_info = "RR:" + str.tostring(i_wcse_tp_rr) + " ET:" + str.tostring(i_wcse_entry_times) + " W:" + str.tostring(i_wcse_c1_wick) + "/" + str.tostring(i_wcse_c2_wick)
+        wcse_info = "RR:" + str.tostring(i_wcse_tp_rr) + " ET:" + str.tostring(i_wcse_entry_times) + " C:" + str.tostring(i_wcse_c1_close) + " WX:" + str.tostring(i_wcse_wick_cross)
         table.cell(stats_table, 1, row, wcse_info, text_color=color.gray, text_size=size.small)
