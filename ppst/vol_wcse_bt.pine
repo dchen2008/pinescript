@@ -306,7 +306,11 @@ wcse_buy = false
 wcse_sell = false
 if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0
     can_enter = i_wcse_entry_times == 0 or wcse_tp_exits < i_wcse_entry_times
-    if can_enter and not is_quiet and not is_low_vol
+    // Vol check: any candle in c0..c3 window meets threshold → pass
+    wcse_vol_ok = not use_vol_filter  // pass if vol filter disabled
+    if use_vol_filter
+        wcse_vol_ok := vol_ratio[3] >= vol_threshold or vol_ratio[2] >= vol_threshold or vol_ratio[1] >= vol_threshold or vol_ratio >= vol_threshold
+    if can_enter and not is_quiet and wcse_vol_ok
         if wcse_armed_dir == 1
             wcse_buy := _wcse_long_pattern
         if wcse_armed_dir == -1

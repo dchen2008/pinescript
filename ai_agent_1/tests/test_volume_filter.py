@@ -6,6 +6,7 @@ import pytest
 
 from src.indicators.volume_filter import compute_relative_volume
 from src.strategy.ppst_circle import PPSTCircleStrategy
+from src.vol import _wcse_any_vol_ok
 
 
 class TestComputeRelativeVolume:
@@ -153,3 +154,61 @@ class TestVolumeThresholdIntegration:
         row = self._make_entry_row(rel_volume=1.5)  # Exactly at threshold
         result = strategy.on_bar(idx=50, row=row, position=None, can_trade=True, entering_quiet=False)
         assert result["action"] == "open_long"
+
+
+class TestAnyVolCheck:
+    """Test _wcse_any_vol_ok helper — any candle in window meets threshold."""
+
+    def _rv(self, values):
+        return np.array(values, dtype=float)
+
+    def test_one_candle_passes(self):
+        """If any single candle >= threshold, check passes."""
+        rv = self._rv([0.5, 0.5, 2.0, 0.5])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)
+
+    def test_all_below_fails(self):
+        """If no candle meets threshold, check fails."""
+        rv = self._rv([0.5, 1.0, 1.5, 1.0])
+        assert not _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)
+
+    def test_exact_boundary_passes(self):
+        """Candle exactly at threshold should pass."""
+        rv = self._rv([0.5, 1.6, 0.5, 0.5])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)
+
+    def test_threshold_zero_skips(self):
+        """Threshold=0 always passes (vol filter effectively disabled)."""
+        rv = self._rv([0.1, 0.1, 0.1, 0.1])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 0, True)
+
+    def test_use_vf_false_skips(self):
+        """use_vf=False always passes."""
+        rv = self._rv([0.1, 0.1, 0.1, 0.1])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, False)
+
+    def test_nan_all_fails(self):
+        """All NaN values should fail."""
+        rv = self._rv([np.nan, np.nan, np.nan, np.nan])
+        assert not _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)
+
+    def test_nan_with_one_good(self):
+        """One good candle among NaN should pass."""
+        rv = self._rv([np.nan, np.nan, 2.0, np.nan])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)
+
+    def test_out_of_bounds_safe(self):
+        """Negative or out-of-bounds indices are skipped safely."""
+        rv = self._rv([2.0, 0.5])
+        # Index -1 and 5 are out of bounds, but index 0 passes
+        assert _wcse_any_vol_ok(rv, [-1, 0, 5], 1.6, True)
+
+    def test_out_of_bounds_all_invalid(self):
+        """All out-of-bounds indices should fail."""
+        rv = self._rv([0.5, 0.5])
+        assert not _wcse_any_vol_ok(rv, [-1, 5], 1.6, True)
+
+    def test_c0_passes_others_low(self):
+        """c0 (bar before C1) having high vol is sufficient."""
+        rv = self._rv([2.0, 0.5, 0.5, 0.5])
+        assert _wcse_any_vol_ok(rv, [0, 1, 2, 3], 1.6, True)

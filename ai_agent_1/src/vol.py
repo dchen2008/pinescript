@@ -41,6 +41,36 @@ from src.utils.forex_utils import pips_to_price
 
 
 # ---------------------------------------------------------------------------
+# Volume filter for WCSE entries — "any candle in window" check
+# ---------------------------------------------------------------------------
+
+def _wcse_any_vol_ok(rel_vol_arr, indices, threshold, use_vf):
+    """Check if ANY candle in the window meets the volume threshold.
+
+    After WCSE pattern is confirmed (C3 found), check c0..c3.
+    If any one candle has vol_ratio >= threshold, the check passes.
+
+    Args:
+        rel_vol_arr: Array of relative volume values.
+        indices: List of bar indices to check (e.g. [i-3, i-2, i-1, i]).
+        threshold: Volume ratio threshold (e.g. 1.6).
+        use_vf: Whether volume filter is enabled.
+
+    Returns:
+        True if vol filter disabled, threshold <= 0, or any candle passes.
+    """
+    if not use_vf or threshold <= 0:
+        return True
+    n = len(rel_vol_arr)
+    for idx in indices:
+        if 0 <= idx < n:
+            rv = rel_vol_arr[idx]
+            if not np.isnan(rv) and rv >= threshold:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Time window helpers (shared by vol.py and vol_tf.py)
 # ---------------------------------------------------------------------------
 
@@ -393,71 +423,71 @@ def run_vol_backtest(
             elif is_quiet_bar or not is_in_etw:
                 pass  # skip during quiet hours / outside ETW
             else:
-                # Volume filter for WCSE2: skip or use alt threshold
-                wcse2_vol_ok = True
-                if not wcse2_params.get("vf_skip", False):
-                    wcse2_vf_threshold = wcse2_params.get("vf_threshold", 3.0)
-                    if (vol_params["use_vol_filter"]
-                            and not np.isnan(rel_vol)
-                            and rel_vol < wcse2_vf_threshold):
-                        wcse2_vol_ok = False
+                # Detect pattern first (no vol check during scan)
+                # Extract 3 bars: c1 (i-2), c2 (i-1), c3 (i)
+                bars_3 = []
+                st_vals_3 = []
+                for k in range(2, -1, -1):  # i-2, i-1, i
+                    r = data.iloc[i - k]
+                    bars_3.append((r["open"], r["high"], r["low"], r["close"]))
+                    if wcse2.armed_dir == 1:
+                        st_vals_3.append(r["tup"])
+                    else:
+                        st_vals_3.append(r["tdown"])
+
+                pattern_match = detect_engulfing_near_st(
+                    bars_3, st_vals_3, wcse2.armed_dir,
+                    c_body_pips=wcse2_params.get("c_body_pips", 0.2),
+                    c_wick_pips=wcse2_params.get("c_wick_pips", 5.0),
+                    c_close_pips=wcse2_params.get("c_close_pips", 5.0),
+                    engulf_body_pips=wcse2_params.get("engulf_body_pips", 1.0),
+                )
+
+                if pattern_match:
+                    # Vol check: any of c0..c3 meets threshold → pass
+                    wcse2_vol_ok = _wcse_any_vol_ok(
+                        data["rel_volume"].values, [i - 3, i - 2, i - 1, i],
+                        wcse2_params.get("vf_threshold", vol_params["vol_threshold"]),
+                        vol_params["use_vol_filter"],
+                    )
+                    if not wcse2_vol_ok:
                         stats["wcse2_skip_vol"] += 1
 
-                if wcse2_vol_ok:
-                    # Extract 3 bars: c1 (i-2), c2 (i-1), c3 (i)
-                    bars_3 = []
-                    st_vals_3 = []
-                    for k in range(2, -1, -1):  # i-2, i-1, i
-                        r = data.iloc[i - k]
-                        bars_3.append((r["open"], r["high"], r["low"], r["close"]))
-                        if wcse2.armed_dir == 1:
-                            st_vals_3.append(r["tup"])
-                        else:
-                            st_vals_3.append(r["tdown"])
+                if pattern_match and wcse2_vol_ok:
+                    stats["wcse2_patterns"] += 1
+                    w2_dir = wcse2.armed_dir
+                    w2_sl_buffer = pips_to_price(wcse2_params.get("sl_buffer_pips", 0.0))
+                    w2_tp_rr = wcse2_params.get("tp_rr", 4.0)
 
-                    pattern_match = detect_engulfing_near_st(
-                        bars_3, st_vals_3, wcse2.armed_dir,
-                        c_body_pips=wcse2_params.get("c_body_pips", 0.2),
-                        c_wick_pips=wcse2_params.get("c_wick_pips", 5.0),
-                        c_close_pips=wcse2_params.get("c_close_pips", 5.0),
-                        engulf_body_pips=wcse2_params.get("engulf_body_pips", 1.0),
-                    )
+                    if w2_dir == 1:
+                        # LONG: entry at close, SL at TUp
+                        spread_entry = close + portfolio.spread_price
+                        sl = tup - w2_sl_buffer
+                        sl_dist = spread_entry - sl
+                    else:
+                        # SHORT: entry at close, SL at TDown
+                        spread_entry = close - portfolio.spread_price
+                        sl = tdown + w2_sl_buffer
+                        sl_dist = sl - spread_entry
 
-                    if pattern_match:
-                        stats["wcse2_patterns"] += 1
-                        w2_dir = wcse2.armed_dir
-                        w2_sl_buffer = pips_to_price(wcse2_params.get("sl_buffer_pips", 0.0))
-                        w2_tp_rr = wcse2_params.get("tp_rr", 4.0)
-
-                        if w2_dir == 1:
-                            # LONG: entry at close, SL at TUp
-                            spread_entry = close + portfolio.spread_price
-                            sl = tup - w2_sl_buffer
-                            sl_dist = spread_entry - sl
-                        else:
-                            # SHORT: entry at close, SL at TDown
-                            spread_entry = close - portfolio.spread_price
-                            sl = tdown + w2_sl_buffer
-                            sl_dist = sl - spread_entry
-
-                        if sl_dist > 0:
-                            tp = spread_entry + w2_dir * sl_dist * w2_tp_rr
-                            units = portfolio.compute_position_size(sl_dist)
-                            if units > 0:
-                                position = Position(
-                                    direction=w2_dir,
-                                    entry_price=close,
-                                    units=units,
-                                    sl_price=sl,
-                                    tp_price=tp,
-                                    entry_bar=i,
-                                    entry_time=str(row["time"]),
-                                    entry_source="wcse2",
-                                )
-                                wcse2_entry = True
-                                stats["wcse2_entries"] += 1
-                                stats["traded"] += 1
-                                wcse2_entry_info.append((i, close, sl, w2_dir, sl_dist))
+                    if sl_dist > 0:
+                        tp = spread_entry + w2_dir * sl_dist * w2_tp_rr
+                        units = portfolio.compute_position_size(sl_dist)
+                        if units > 0:
+                            position = Position(
+                                direction=w2_dir,
+                                entry_price=close,
+                                units=units,
+                                sl_price=sl,
+                                tp_price=tp,
+                                entry_bar=i,
+                                entry_time=str(row["time"]),
+                                entry_source="wcse2",
+                            )
+                            wcse2_entry = True
+                            stats["wcse2_entries"] += 1
+                            stats["traded"] += 1
+                            wcse2_entry_info.append((i, close, sl, w2_dir, sl_dist))
 
         # ── WCSE1 pending stop fill ──
         wcse_entry = False
@@ -469,6 +499,18 @@ def run_vol_backtest(
                 ps["direction"],
             )
             if filled:
+                # Vol check: any of c0..c3 meets threshold → pass
+                # c0=placed-2, c1=placed-1, c2=placed, c3=fill bar (i)
+                pb = ps["placed_bar"]
+                wcse_fill_vol_ok = _wcse_any_vol_ok(
+                    data["rel_volume"].values, [pb - 2, pb - 1, pb, i],
+                    wcse_params.get("vf_threshold", vol_params["vol_threshold"]),
+                    vol_params["use_vol_filter"],
+                )
+                if not wcse_fill_vol_ok:
+                    stats["wcse_skip_vol"] += 1
+                    wcse1_pending_stop = None
+                    continue
                 if fill_price == open_price and fill_price != ps["stop_price"]:
                     stats["wcse_stop_gap_fills"] += 1
                 else:
@@ -551,70 +593,60 @@ def run_vol_backtest(
             elif is_quiet_bar or not is_in_etw:
                 pass  # skip during quiet hours / outside ETW
             else:
-                # Volume filter for WCSE: skip or use alt threshold
-                wcse_vol_ok = True
-                if not wcse_params.get("vf_skip", False):
-                    wcse_vf_threshold = wcse_params.get("vf_threshold", 3.0)
-                    if (vol_params["use_vol_filter"]
-                            and not np.isnan(rel_vol)
-                            and rel_vol < wcse_vf_threshold):
-                        wcse_vol_ok = False
-                        stats["wcse_skip_vol"] += 1
+                # No vol check at setup — checked at fill when c0..c3 available
+                row_m1 = data.iloc[i - 1]  # c1
+                # c2 is current bar (fully closed in backtest)
+                wcse_dir = wcse.armed_dir
 
-                if wcse_vol_ok:
-                    row_m1 = data.iloc[i - 1]  # c1
-                    # c2 is current bar (fully closed in backtest)
-                    wcse_dir = wcse.armed_dir
+                if wcse_dir == 1:
+                    c1_st = row_m1["tup"]
+                    c2_st = tup
+                else:
+                    c1_st = row_m1["tdown"]
+                    c2_st = tdown
+
+                valid, breakout_level = detect_wcse1_setup(
+                    (row_m1["open"], row_m1["high"], row_m1["low"], row_m1["close"]),
+                    (open_price, high, low, close),
+                    c1_st, c2_st, wcse_dir,
+                    c1_body_pips=wcse_params.get("c1_body_pips", 3.0),
+                    c1_wick_pips=wcse_params.get("c1_wick_pips", 0.5),
+                    c1_close_pips=wcse_params.get("c1_close_pips", 1.0),
+                    c2_body_pips=wcse_params.get("c2_body_pips", 2.0),
+                    c2_wick_pips=wcse_params.get("c2_wick_pips", 0.5),
+                    c2_close_pips=wcse_params.get("c2_close_pips", 1.0),
+                )
+
+                if valid:
+                    stats["wcse_patterns"] += 1
+                    stop_buffer = pips_to_price(wcse_params.get("stop_buffer_pips", 0.3))
+                    stop_price = breakout_level + wcse_dir * stop_buffer
+
+                    # Compute SL/TP using c2's SuperTrend (current bar)
+                    wcse_sl_buffer = pips_to_price(wcse_params.get("sl_buffer_pips", 0.0))
+                    wcse_tp_rr = wcse_params.get("tp_rr", 2.0)
 
                     if wcse_dir == 1:
-                        c1_st = row_m1["tup"]
-                        c2_st = tup
+                        sl = tup - wcse_sl_buffer
+                        spread_entry = stop_price + portfolio.spread_price
+                        sl_dist = spread_entry - sl
                     else:
-                        c1_st = row_m1["tdown"]
-                        c2_st = tdown
+                        sl = tdown + wcse_sl_buffer
+                        spread_entry = stop_price - portfolio.spread_price
+                        sl_dist = sl - spread_entry
 
-                    valid, breakout_level = detect_wcse1_setup(
-                        (row_m1["open"], row_m1["high"], row_m1["low"], row_m1["close"]),
-                        (open_price, high, low, close),
-                        c1_st, c2_st, wcse_dir,
-                        c1_body_pips=wcse_params.get("c1_body_pips", 3.0),
-                        c1_wick_pips=wcse_params.get("c1_wick_pips", 0.5),
-                        c1_close_pips=wcse_params.get("c1_close_pips", 1.0),
-                        c2_body_pips=wcse_params.get("c2_body_pips", 2.0),
-                        c2_wick_pips=wcse_params.get("c2_wick_pips", 0.5),
-                        c2_close_pips=wcse_params.get("c2_close_pips", 1.0),
-                    )
-
-                    if valid:
-                        stats["wcse_patterns"] += 1
-                        stop_buffer = pips_to_price(wcse_params.get("stop_buffer_pips", 0.3))
-                        stop_price = breakout_level + wcse_dir * stop_buffer
-
-                        # Compute SL/TP using c2's SuperTrend (current bar)
-                        wcse_sl_buffer = pips_to_price(wcse_params.get("sl_buffer_pips", 0.0))
-                        wcse_tp_rr = wcse_params.get("tp_rr", 2.0)
-
-                        if wcse_dir == 1:
-                            sl = tup - wcse_sl_buffer
-                            spread_entry = stop_price + portfolio.spread_price
-                            sl_dist = spread_entry - sl
-                        else:
-                            sl = tdown + wcse_sl_buffer
-                            spread_entry = stop_price - portfolio.spread_price
-                            sl_dist = sl - spread_entry
-
-                        if sl_dist > 0:
-                            tp = spread_entry + wcse_dir * sl_dist * wcse_tp_rr
-                            units = portfolio.compute_position_size(sl_dist)
-                            if units > 0:
-                                wcse1_pending_stop = {
-                                    "direction": wcse_dir,
-                                    "stop_price": stop_price,
-                                    "sl": sl,
-                                    "tp": tp,
-                                    "units": units,
-                                    "placed_bar": i,
-                                }
+                    if sl_dist > 0:
+                        tp = spread_entry + wcse_dir * sl_dist * wcse_tp_rr
+                        units = portfolio.compute_position_size(sl_dist)
+                        if units > 0:
+                            wcse1_pending_stop = {
+                                "direction": wcse_dir,
+                                "stop_price": stop_price,
+                                "sl": sl,
+                                "tp": tp,
+                                "units": units,
+                                "placed_bar": i,
+                            }
 
         # ── Execute buy signal ──
         if not wcse2_entry and not wcse_entry and buy_signal and (position is None or (position is not None and position.is_short)):
@@ -885,8 +917,7 @@ def build_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wcse-tp-rr", type=float, default=None, help="TP risk:reward ratio")
     parser.add_argument("--wcse-sl-buffer", type=float, default=None, help="SL buffer pips")
     parser.add_argument("--wcse-stop-buffer", type=float, default=None, help="Stop order buffer pips above/below c2 extreme")
-    parser.add_argument("--wcse-vf-skip", action="store_true", help="Skip vol filter for WCSE")
-    parser.add_argument("--wcse-vf-threshold", type=float, default=None, help="Alt vol threshold")
+    parser.add_argument("--wcse-vf-threshold", type=float, default=None, help="WCSE vol threshold (defaults to main vol_threshold)")
 
     # WCSE2 overrides (CLI takes priority over config YAML)
     parser.add_argument("--wcse2", action="store_true", help="Enable WCSE2")
@@ -897,8 +928,7 @@ def build_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wcse2-engulf-body", type=float, default=None, help="Engulfing candle min body pips")
     parser.add_argument("--wcse2-tp-rr", type=float, default=None, help="TP risk:reward ratio")
     parser.add_argument("--wcse2-sl-buffer", type=float, default=None, help="SL buffer pips")
-    parser.add_argument("--wcse2-vf-skip", action="store_true", help="Skip vol filter for WCSE2")
-    parser.add_argument("--wcse2-vf-threshold", type=float, default=None, help="Alt vol threshold")
+    parser.add_argument("--wcse2-vf-threshold", type=float, default=None, help="WCSE2 vol threshold (defaults to main vol_threshold)")
 
     # Output
     parser.add_argument("--label", default=None, help="Result label")
@@ -976,8 +1006,8 @@ def build_params(args) -> Tuple[dict, dict, dict, dict, dict, dict, dict]:
         "tp_rr": args.wcse_tp_rr if args.wcse_tp_rr is not None else wcse_cfg.get("tp_rr", 2.0),
         "sl_buffer_pips": args.wcse_sl_buffer if args.wcse_sl_buffer is not None else wcse_cfg.get("sl_buffer_pips", 0.0),
         "stop_buffer_pips": args.wcse_stop_buffer if args.wcse_stop_buffer is not None else wcse_cfg.get("stop_buffer_pips", 0.3),
-        "vf_skip": args.wcse_vf_skip if args.wcse_vf_skip else wcse_cfg.get("vf_skip", False),
-        "vf_threshold": args.wcse_vf_threshold if args.wcse_vf_threshold is not None else wcse_cfg.get("vf_threshold", 3.0),
+        "vf_threshold": args.wcse_vf_threshold if args.wcse_vf_threshold is not None
+            else (0 if wcse_cfg.get("vf_skip", False) else wcse_cfg.get("vf_threshold", vol_params["vol_threshold"])),
     }
 
     # Load WCSE2 from config yaml, override with CLI args
@@ -992,8 +1022,8 @@ def build_params(args) -> Tuple[dict, dict, dict, dict, dict, dict, dict]:
         "engulf_body_pips": args.wcse2_engulf_body if args.wcse2_engulf_body is not None else wcse2_cfg.get("engulf_body_pips", 1.0),
         "tp_rr": args.wcse2_tp_rr if args.wcse2_tp_rr is not None else wcse2_cfg.get("tp_rr", 4.0),
         "sl_buffer_pips": args.wcse2_sl_buffer if args.wcse2_sl_buffer is not None else wcse2_cfg.get("sl_buffer_pips", 0.0),
-        "vf_skip": args.wcse2_vf_skip if args.wcse2_vf_skip else wcse2_cfg.get("vf_skip", False),
-        "vf_threshold": args.wcse2_vf_threshold if args.wcse2_vf_threshold is not None else wcse2_cfg.get("vf_threshold", 3.0),
+        "vf_threshold": args.wcse2_vf_threshold if args.wcse2_vf_threshold is not None
+            else (0 if wcse2_cfg.get("vf_skip", False) else wcse2_cfg.get("vf_threshold", vol_params["vol_threshold"])),
     }
 
     return ppst_params, vol_params, quiet_params, strategy_params, sizing_params, wcse_params, wcse2_params
