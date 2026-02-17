@@ -1,7 +1,9 @@
 """Wick Cross SuperTrend Entry (WCSE) — pattern detection and state machine.
 
-Detects a 3-candle pullback-rejection pattern near SuperTrend support/resistance
-as an alternative entry when the normal signal gets volume-filtered.
+Three close-price entry patterns near SuperTrend support/resistance:
+  A. Engulfing 2-candle (E2): pullback C1 near ST, C2 engulfs C1
+  B. Engulfing 3-candle (E3): C1 near ST, C2+C3 net move engulfs C1
+  C. Wick Cross (WX): wick pierces ST, body stays on trend side
 """
 
 from dataclasses import dataclass
@@ -45,354 +47,197 @@ class WickCrossState:
         self.tp_exits_count += 1
 
 
-def detect_wick_cross_long(
-    o2: float, h2: float, l2: float, c2: float, tup2: float,
-    o1: float, h1: float, l1: float, c1: float, tup1: float,
-    oi: float, ci: float,
-    c1_body_pips: float = 3.0,
-    c1_wick_pips: float = 0.5,
-    c1_close_pips: float = 1.0,
-    c2_body_pips: float = 2.0,
-    c2_wick_pips: float = 0.5,
-    c2_close_pips: float = 1.0,
+def detect_engulf_2(
+    c1_ohlc: tuple,
+    c2_ohlc: tuple,
+    st: float,
+    direction: int,
+    c1_close_pips: float = 0.8,
+    c1_body_pips: float = 0.1,
+    c2_body_pips: float = 0.6,
 ) -> bool:
-    """Detect LONG wick-cross pattern near TUp (support).
+    """Pattern A: 2-candle engulfing near SuperTrend.
+
+    LONG: c1 RED near TUp, c2 GREEN engulfs c1.
+    SHORT: c1 GREEN near TDown, c2 RED engulfs c1.
 
     Args:
-        o2,h2,l2,c2,tup2: 1st candle (bar i-2) OHLC + SuperTrend TUp
-        o1,h1,l1,c1,tup1: 2nd candle (bar i-1) OHLC + SuperTrend TUp
-        oi,ci: 3rd candle (bar i) open + close
-        c1/c2 body/wick/close pips: pattern thresholds
+        c1_ohlc: (open, high, low, close) of bar i-1.
+        c2_ohlc: (open, high, low, close) of bar i.
+        st: SuperTrend value at c1's bar (TUp for long, TDown for short).
+        direction: 1=LONG, -1=SHORT.
+        c1_close_pips: Max distance from c1 close to ST.
+        c1_body_pips: Min body size for c1.
+        c2_body_pips: Min body size for c2.
 
     Returns:
-        True if the 3-candle LONG pattern matches.
+        True if the 2-candle engulfing pattern matches.
     """
-    c1_body_price = pips_to_price(c1_body_pips)
-    c1_wick_price = pips_to_price(c1_wick_pips)
     c1_close_price = pips_to_price(c1_close_pips)
+    c1_body_price = pips_to_price(c1_body_pips)
     c2_body_price = pips_to_price(c2_body_pips)
-    c2_wick_price = pips_to_price(c2_wick_pips)
-    c2_close_price = pips_to_price(c2_close_pips)
 
-    # --- 1st candle (bar i-2): RED, body >= threshold ---
-    if c2 >= o2:  # not red
-        return False
-    body1 = o2 - c2
-    if body1 < c1_body_price:
-        return False
+    o1, _, _, c1 = c1_ohlc
+    o2, _, _, c2 = c2_ohlc
 
-    # Touch or cross: (b) low within wick_pips of TUp OR close within close_pips of TUp
-    #                 (c) low < TUp AND close > TUp (wick crossed, close didn't)
-    touch_b = (l2 >= tup2) and ((l2 - tup2) <= c1_wick_price or abs(c2 - tup2) <= c1_close_price)
-    cross_c = (l2 < tup2) and (c2 > tup2)
-    if not (touch_b or cross_c):
-        return False
+    if direction == 1:
+        # c1: RED, body >= min, close near TUp
+        if c1 >= o1:
+            return False
+        c1_body = o1 - c1
+        if c1_body < c1_body_price:
+            return False
+        if abs(c1 - st) > c1_close_price:
+            return False
+        # c2: GREEN, body >= min, engulfs c1
+        if c2 <= o2:
+            return False
+        c2_body = c2 - o2
+        if c2_body < c2_body_price:
+            return False
+        if c2_body <= c1_body:
+            return False
+        return True
+    else:
+        # c1: GREEN, body >= min, close near TDown
+        if c1 <= o1:
+            return False
+        c1_body = c1 - o1
+        if c1_body < c1_body_price:
+            return False
+        if abs(c1 - st) > c1_close_price:
+            return False
+        # c2: RED, body >= min, engulfs c1
+        if c2 >= o2:
+            return False
+        c2_body = o2 - c2
+        if c2_body < c2_body_price:
+            return False
+        if c2_body <= c1_body:
+            return False
+        return True
 
-    # --- 2nd candle (bar i-1): GREEN, body >= threshold ---
-    if c1 <= o1:  # not green
-        return False
-    body2 = c1 - o1
-    if body2 < c2_body_price:
-        return False
 
-    # Touch: low within wick_pips of TUp OR close within close_pips of TUp
-    touch_2 = (l1 >= tup1) and ((l1 - tup1) <= c2_wick_price or abs(c1 - tup1) <= c2_close_price)
-    if not touch_2:
-        return False
-
-    # No cross: low must stay >= TUp
-    if l1 < tup1:
-        return False
-
-    # --- 3rd candle (bar i): GREEN (close > open) ---
-    if ci <= oi:
-        return False
-
-    return True
-
-
-def detect_engulfing_near_st(
-    bars: list,        # [(o, h, l, c), ...] 3 bars: c1 (i-2), c2 (i-1), c3 (i)
-    st_values: list,   # ST value for each bar (TUp for long, TDown for short)
-    direction: int,    # 1=LONG, -1=SHORT
-    c_body_pips: float = 0.2,
-    c_wick_pips: float = 5.0,
-    c_close_pips: float = 5.0,
-    engulf_body_pips: float = 1.0,
+def detect_engulf_3(
+    c1_ohlc: tuple,
+    c2_ohlc: tuple,
+    c3_ohlc: tuple,
+    st: float,
+    direction: int,
+    c1_close_pips: float = 0.8,
+    c1_body_pips: float = 0.1,
+    c2_body_pips: float = 0.6,
 ) -> bool:
-    """Detect 3-candle engulfing pattern near SuperTrend (WCSE2).
+    """Pattern B: 3-candle engulfing near SuperTrend.
 
-    Fixed 3-candle pattern:
-    - c1 (i-2): any color, near SuperTrend (wick or close proximity)
-    - c2 (i-1): any color, body >= c_body_pips
-    - c3 (i):   engulfing candle — GREEN for LONG, RED for SHORT,
-                 body covers combined body range of c1+c2
+    LONG: c1 (i-2) RED near TUp, c3 (i) GREEN, net move c3.close - c2.open > c1 body.
+    SHORT: c1 (i-2) GREEN near TDown, c3 (i) RED, net move c2.open - c3.close > c1 body.
 
     Args:
-        bars: 3 bars as (open, high, low, close) tuples: [c1, c2, c3].
-        st_values: SuperTrend value for each bar.
-        direction: 1 for LONG (bullish engulfing near TUp), -1 for SHORT.
-        c_body_pips: Min body size for c1 and c2 (filters dojis).
-        c_wick_pips: c1 wick proximity to ST.
-        c_close_pips: c1 close proximity to ST.
-        engulf_body_pips: Min body size for c3 (engulfing candle).
+        c1_ohlc: (open, high, low, close) of bar i-2.
+        c2_ohlc: (open, high, low, close) of bar i-1.
+        c3_ohlc: (open, high, low, close) of bar i.
+        st: SuperTrend value at c1's bar (i-2).
+        direction: 1=LONG, -1=SHORT.
+        c1_close_pips: Max distance from c1 close to ST.
+        c1_body_pips: Min body size for c1.
+        c2_body_pips: Min body size for c3.
 
     Returns:
         True if the 3-candle engulfing pattern matches.
     """
-    c_body_price = pips_to_price(c_body_pips)
-    c_wick_price = pips_to_price(c_wick_pips)
-    c_close_price = pips_to_price(c_close_pips)
-    engulf_body_price = pips_to_price(engulf_body_pips)
-
-    c1_o, c1_h, c1_l, c1_c = bars[0]
-    c2_o, c2_h, c2_l, c2_c = bars[1]
-    c3_o, c3_h, c3_l, c3_c = bars[2]
-    st1 = st_values[0]
-
-    # --- c3: engulfing candle ---
-    # Check color: GREEN for LONG, RED for SHORT
-    if direction == 1 and c3_c <= c3_o:
-        return False
-    if direction == -1 and c3_c >= c3_o:
-        return False
-
-    # Check c3 body size
-    c3_body = abs(c3_c - c3_o)
-    if c3_body < engulf_body_price:
-        return False
-
-    # --- c1: near SuperTrend, body >= threshold ---
-    if abs(c1_c - c1_o) < c_body_price:
-        return False
-
-    if direction == 1:
-        near_st = abs(c1_l - st1) <= c_wick_price or abs(c1_c - st1) <= c_close_price
-    else:
-        near_st = abs(c1_h - st1) <= c_wick_price or abs(c1_c - st1) <= c_close_price
-    if not near_st:
-        return False
-
-    # --- c2: body >= threshold ---
-    if abs(c2_c - c2_o) < c_body_price:
-        return False
-
-    # --- c3 body must cover combined body range of c1+c2 ---
-    combined_lo = min(min(c1_o, c1_c), min(c2_o, c2_c))
-    combined_hi = max(max(c1_o, c1_c), max(c2_o, c2_c))
-
-    c3_body_lo = min(c3_o, c3_c)
-    c3_body_hi = max(c3_o, c3_c)
-
-    if c3_body_lo > combined_lo or c3_body_hi < combined_hi:
-        return False
-
-    return True
-
-
-def detect_wcse1_setup(
-    c1_ohlc: tuple,    # (open, high, low, close) — bar i-1 (fully closed)
-    c2_ohlc: tuple,    # (open, high, low, close) — bar i   (fully closed)
-    c1_st: float,      # TUp (long) or TDown (short) at c1
-    c2_st: float,      # TUp (long) or TDown (short) at c2
-    direction: int,    # 1=LONG, -1=SHORT
-    c1_body_pips: float = 3.0,
-    c1_wick_pips: float = 0.5,
-    c1_close_pips: float = 1.0,
-    c2_body_pips: float = 2.0,
-    c2_wick_pips: float = 0.5,
-    c2_close_pips: float = 1.0,
-) -> tuple:
-    """Validate c1+c2 pullback-rejection setup for WCSE1 stop order entry.
-
-    Unlike detect_wick_cross_long/short, this does NOT check c3 color.
-    Instead it returns the breakout level (c2.high for LONG, c2.low for SHORT)
-    so a stop order can be placed for the next bar.
-
-    Args:
-        c1_ohlc: 1st candle OHLC (RED for long, GREEN for short).
-        c2_ohlc: 2nd candle OHLC (GREEN for long, RED for short).
-        c1_st: SuperTrend value at c1 (TUp for long, TDown for short).
-        c2_st: SuperTrend value at c2.
-        direction: 1=LONG, -1=SHORT.
-        c1/c2 body/wick/close pips: pattern thresholds.
-
-    Returns:
-        (valid, breakout_level): valid=True if setup matches,
-        breakout_level = c2.high (long) or c2.low (short).
-    """
-    c1_body_price = pips_to_price(c1_body_pips)
-    c1_wick_price = pips_to_price(c1_wick_pips)
     c1_close_price = pips_to_price(c1_close_pips)
-    c2_body_price = pips_to_price(c2_body_pips)
-    c2_wick_price = pips_to_price(c2_wick_pips)
-    c2_close_price = pips_to_price(c2_close_pips)
+    c1_body_price = pips_to_price(c1_body_pips)
+    c3_body_price = pips_to_price(c2_body_pips)
 
-    o1, h1, l1, c1 = c1_ohlc
-    o2, h2, l2, c2 = c2_ohlc
+    o1, _, _, c1 = c1_ohlc
+    o2, _, _, _ = c2_ohlc
+    o3, _, _, c3 = c3_ohlc
 
     if direction == 1:
-        # --- LONG setup ---
-        # c1: RED, body >= threshold
+        # c1: RED, body >= min, close near TUp
         if c1 >= o1:
-            return (False, 0.0)
-        if (o1 - c1) < c1_body_price:
-            return (False, 0.0)
-
-        # c1 touch/cross TUp
-        touch_b = (l1 >= c1_st) and ((l1 - c1_st) <= c1_wick_price or abs(c1 - c1_st) <= c1_close_price)
-        cross_c = (l1 < c1_st) and (c1 > c1_st)
-        if not (touch_b or cross_c):
-            return (False, 0.0)
-
-        # c2: GREEN, body >= threshold
-        if c2 <= o2:
-            return (False, 0.0)
-        if (c2 - o2) < c2_body_price:
-            return (False, 0.0)
-
-        # c2 touch TUp (no cross below)
-        touch_2 = (l2 >= c2_st) and ((l2 - c2_st) <= c2_wick_price or abs(c2 - c2_st) <= c2_close_price)
-        if not touch_2:
-            return (False, 0.0)
-        if l2 < c2_st:
-            return (False, 0.0)
-
-        return (True, h2)
-
+            return False
+        c1_body = o1 - c1
+        if c1_body < c1_body_price:
+            return False
+        if abs(c1 - st) > c1_close_price:
+            return False
+        # c3: GREEN, body >= min
+        if c3 <= o3:
+            return False
+        c3_body = c3 - o3
+        if c3_body < c3_body_price:
+            return False
+        # net move: c3.close - c2.open > c1 body
+        net_move = c3 - o2
+        if net_move <= c1_body:
+            return False
+        return True
     else:
-        # --- SHORT setup ---
-        # c1: GREEN, body >= threshold
+        # c1: GREEN, body >= min, close near TDown
         if c1 <= o1:
-            return (False, 0.0)
-        if (c1 - o1) < c1_body_price:
-            return (False, 0.0)
-
-        # c1 touch/cross TDown
-        touch_b = (h1 <= c1_st) and ((c1_st - h1) <= c1_wick_price or abs(c1 - c1_st) <= c1_close_price)
-        cross_c = (h1 > c1_st) and (c1 < c1_st)
-        if not (touch_b or cross_c):
-            return (False, 0.0)
-
-        # c2: RED, body >= threshold
-        if c2 >= o2:
-            return (False, 0.0)
-        if (o2 - c2) < c2_body_price:
-            return (False, 0.0)
-
-        # c2 touch TDown (no cross above)
-        touch_2 = (h2 <= c2_st) and ((c2_st - h2) <= c2_wick_price or abs(c2 - c2_st) <= c2_close_price)
-        if not touch_2:
-            return (False, 0.0)
-        if h2 > c2_st:
-            return (False, 0.0)
-
-        return (True, l2)
+            return False
+        c1_body = c1 - o1
+        if c1_body < c1_body_price:
+            return False
+        if abs(c1 - st) > c1_close_price:
+            return False
+        # c3: RED, body >= min
+        if c3 >= o3:
+            return False
+        c3_body = o3 - c3
+        if c3_body < c3_body_price:
+            return False
+        # net move: c2.open - c3.close > c1 body
+        net_move = o2 - c3
+        if net_move <= c1_body:
+            return False
+        return True
 
 
-def check_stop_fill(
-    bar_ohlc: tuple,     # (open, high, low, close)
-    stop_price: float,
-    direction: int,      # 1=buy stop, -1=sell stop
-) -> tuple:
-    """Check if a stop order would fill on this bar.
+def detect_wick_cross(
+    candle_ohlc: tuple,
+    st: float,
+    direction: int,
+    wx_st_pips: float = 0.4,
+) -> bool:
+    """Pattern C: wick pierces SuperTrend, body stays on trend side.
 
-    Buy stop: triggers when price rises TO or ABOVE stop_price.
-    Sell stop: triggers when price falls TO or BELOW stop_price.
+    LONG: GREEN candle, low < TUp, TUp - low >= wx_st_pips, close > TUp.
+    SHORT: RED candle, high > TDown, high - TDown >= wx_st_pips, close < TDown.
 
     Args:
-        bar_ohlc: (open, high, low, close) of the bar.
-        stop_price: The stop order price level.
-        direction: 1 for buy stop, -1 for sell stop.
+        candle_ohlc: (open, high, low, close) of current bar.
+        st: SuperTrend value (TUp for long, TDown for short).
+        direction: 1=LONG, -1=SHORT.
+        wx_st_pips: Min wick depth through SuperTrend.
 
     Returns:
-        (filled, fill_price): filled=True if stop triggered,
-        fill_price = open (gap) or stop_price (normal).
+        True if the wick cross pattern matches.
     """
-    o, h, l, c = bar_ohlc
+    wx_st_price = pips_to_price(wx_st_pips)
+    o, h, l, c = candle_ohlc
 
     if direction == 1:
-        # Buy stop: triggers at or above stop_price
-        if o >= stop_price:
-            return (True, o)  # gap fill at open
-        if h >= stop_price:
-            return (True, stop_price)
-        return (False, 0.0)
+        # GREEN candle, wick below TUp, depth >= threshold, close above TUp
+        if c <= o:
+            return False
+        if l >= st:
+            return False
+        if st - l < wx_st_price:
+            return False
+        if c <= st:
+            return False
+        return True
     else:
-        # Sell stop: triggers at or below stop_price
-        if o <= stop_price:
-            return (True, o)  # gap fill at open
-        if l <= stop_price:
-            return (True, stop_price)
-        return (False, 0.0)
-
-
-def detect_wick_cross_short(
-    o2: float, h2: float, l2: float, c2: float, tdown2: float,
-    o1: float, h1: float, l1: float, c1: float, tdown1: float,
-    oi: float, ci: float,
-    c1_body_pips: float = 3.0,
-    c1_wick_pips: float = 0.5,
-    c1_close_pips: float = 1.0,
-    c2_body_pips: float = 2.0,
-    c2_wick_pips: float = 0.5,
-    c2_close_pips: float = 1.0,
-) -> bool:
-    """Detect SHORT wick-cross pattern near TDown (resistance).
-
-    Mirror of detect_wick_cross_long:
-    - 1st candle (i-2): GREEN, pulls up toward TDown
-    - 2nd candle (i-1): RED, bounces off TDown
-    - 3rd candle (i): RED (close < open)
-
-    Args:
-        o2,h2,l2,c2,tdown2: 1st candle (bar i-2) OHLC + SuperTrend TDown
-        o1,h1,l1,c1,tdown1: 2nd candle (bar i-1) OHLC + SuperTrend TDown
-        oi,ci: 3rd candle (bar i) open + close
-        c1/c2 body/wick/close pips: pattern thresholds
-
-    Returns:
-        True if the 3-candle SHORT pattern matches.
-    """
-    c1_body_price = pips_to_price(c1_body_pips)
-    c1_wick_price = pips_to_price(c1_wick_pips)
-    c1_close_price = pips_to_price(c1_close_pips)
-    c2_body_price = pips_to_price(c2_body_pips)
-    c2_wick_price = pips_to_price(c2_wick_pips)
-    c2_close_price = pips_to_price(c2_close_pips)
-
-    # --- 1st candle (bar i-2): GREEN, body >= threshold ---
-    if c2 <= o2:  # not green
-        return False
-    body1 = c2 - o2
-    if body1 < c1_body_price:
-        return False
-
-    # Touch or cross: (b) high within wick_pips of TDown OR close within close_pips
-    #                 (c) high > TDown AND close < TDown (wick crossed, close didn't)
-    touch_b = (h2 <= tdown2) and ((tdown2 - h2) <= c1_wick_price or abs(c2 - tdown2) <= c1_close_price)
-    cross_c = (h2 > tdown2) and (c2 < tdown2)
-    if not (touch_b or cross_c):
-        return False
-
-    # --- 2nd candle (bar i-1): RED, body >= threshold ---
-    if c1 >= o1:  # not red
-        return False
-    body2 = o1 - c1
-    if body2 < c2_body_price:
-        return False
-
-    # Touch: high within wick_pips of TDown OR close within close_pips
-    touch_2 = (h1 <= tdown1) and ((tdown1 - h1) <= c2_wick_price or abs(c1 - tdown1) <= c2_close_price)
-    if not touch_2:
-        return False
-
-    # No cross: high must stay <= TDown
-    if h1 > tdown1:
-        return False
-
-    # --- 3rd candle (bar i): RED (close < open) ---
-    if ci >= oi:
-        return False
-
-    return True
+        # RED candle, wick above TDown, depth >= threshold, close below TDown
+        if c >= o:
+            return False
+        if h <= st:
+            return False
+        if h - st < wx_st_price:
+            return False
+        if c >= st:
+            return False
+        return True

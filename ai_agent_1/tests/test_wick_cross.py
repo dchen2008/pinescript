@@ -4,9 +4,11 @@ import pytest
 
 from src.strategy.wick_cross import (
     WickCrossState,
-    detect_wick_cross_long,
-    detect_wick_cross_short,
+    detect_engulf_2,
+    detect_engulf_3,
+    detect_wick_cross,
 )
+from src.utils.forex_utils import pips_to_price
 
 
 # ---------------------------------------------------------------------------
@@ -83,182 +85,154 @@ class TestWickCrossState:
 
 
 # ---------------------------------------------------------------------------
-# detect_wick_cross_long tests
+# detect_engulf_2 tests (Pattern A)
 # ---------------------------------------------------------------------------
 
-class TestDetectWickCrossLong:
-    """LONG pattern: RED candle touches TUp, GREEN candle bounces, GREEN confirm."""
+class TestDetectEngulf2:
+    """Test the 2-candle engulfing pattern near SuperTrend."""
 
-    # Helper: build a valid touch pattern (low near TUp, not crossing)
-    # TUp = 1.08000
-    # C1 (i-2): RED, o=1.08060, h=1.08070, l=1.08003, c=1.08020  (body=4 pips, low 0.3 pips above TUp)
-    # C2 (i-1): GREEN, o=1.08010, h=1.08050, l=1.08004, c=1.08040 (body=3 pips, low 0.4 pips above TUp)
-    # C3 (i): GREEN, o=1.08020, c=1.08050
+    # Helper: build candle tuple (open, high, low, close)
+    # EUR/USD prices near 1.08000, pip = 0.0001
 
-    def _valid_touch_long(self):
+    def test_long_match(self):
+        """LONG: c1 RED near TUp, c2 GREEN engulfs c1."""
         tup = 1.08000
-        return dict(
-            o2=1.08060, h2=1.08070, l2=1.08003, c2=1.08020, tup2=tup,
-            o1=1.08010, h1=1.08050, l1=1.08004, c1=1.08040, tup1=tup,
-            oi=1.08020, ci=1.08050,
-            c1_body_pips=3.0, c1_wick_pips=0.5, c1_close_pips=1.0,
-            c2_body_pips=2.0, c2_wick_pips=0.5, c2_close_pips=1.0,
-        )
+        # c1: RED, close near TUp, body = 2 pips
+        c1 = (1.08020, 1.08025, 1.07995, 1.08000)  # open > close, close = TUp
+        # c2: GREEN, body > c1 body (3 pips > 2 pips)
+        c2 = (1.08005, 1.08040, 1.08000, 1.08035)
+        assert detect_engulf_2(c1, c2, tup, 1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def test_valid_touch_pattern(self):
-        """Valid LONG touch pattern should return True."""
-        assert detect_wick_cross_long(**self._valid_touch_long()) is True
+    def test_short_match(self):
+        """SHORT: c1 GREEN near TDown, c2 RED engulfs c1."""
+        tdown = 1.08100
+        # c1: GREEN, close near TDown, body = 2 pips
+        c1 = (1.08080, 1.08110, 1.08075, 1.08100)
+        # c2: RED, body > c1 body (3 pips > 2 pips)
+        c2 = (1.08095, 1.08100, 1.08060, 1.08065)
+        assert detect_engulf_2(c1, c2, tdown, -1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def test_valid_cross_pattern(self):
-        """1st candle wick crosses below TUp but closes above → valid."""
-        params = self._valid_touch_long()
-        # low below TUp, close above TUp
-        params["l2"] = 1.07990  # below TUp
-        params["c2"] = 1.08020  # above TUp
-        assert detect_wick_cross_long(**params) is True
+    def test_c1_too_far_from_st(self):
+        """c1 close too far from TUp → no match."""
+        tup = 1.08000
+        # c1: RED, but close is 2 pips above TUp (outside 0.8 pip threshold)
+        c1 = (1.08040, 1.08045, 1.08015, 1.08020)
+        c2 = (1.08025, 1.08060, 1.08020, 1.08055)
+        assert not detect_engulf_2(c1, c2, tup, 1, c1_close_pips=0.8)
 
-    def test_reject_green_first_candle(self):
-        """1st candle must be RED."""
-        params = self._valid_touch_long()
-        params["o2"] = 1.08010  # open < close → GREEN
-        params["c2"] = 1.08060
-        assert detect_wick_cross_long(**params) is False
+    def test_c2_doesnt_engulf(self):
+        """c2 body smaller than c1 → no engulfing."""
+        tup = 1.08000
+        c1 = (1.08030, 1.08035, 1.07995, 1.08000)  # body = 3 pips
+        c2 = (1.08005, 1.08020, 1.08000, 1.08015)  # body = 1 pip (< 3 pips)
+        assert not detect_engulf_2(c1, c2, tup, 1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def test_reject_small_body_first(self):
-        """1st candle body too small."""
-        params = self._valid_touch_long()
-        params["o2"] = 1.08030  # body = 1 pip (< 3 pip threshold)
-        params["c2"] = 1.08020
-        assert detect_wick_cross_long(**params) is False
+    def test_wrong_colors(self):
+        """c1 GREEN (should be RED for long) → no match."""
+        tup = 1.08000
+        c1 = (1.07990, 1.08010, 1.07985, 1.08000)  # GREEN (close > open)
+        c2 = (1.08005, 1.08040, 1.08000, 1.08035)
+        assert not detect_engulf_2(c1, c2, tup, 1)
 
-    def test_reject_first_candle_too_far_from_tup(self):
-        """1st candle low too far from TUp (no touch, no cross)."""
-        params = self._valid_touch_long()
-        params["l2"] = 1.08020  # 2 pips above TUp
-        params["c2"] = 1.08020  # also 2 pips above TUp
-        assert detect_wick_cross_long(**params) is False
-
-    def test_reject_red_second_candle(self):
-        """2nd candle must be GREEN."""
-        params = self._valid_touch_long()
-        params["o1"] = 1.08040  # open > close → RED
-        params["c1"] = 1.08010
-        assert detect_wick_cross_long(**params) is False
-
-    def test_reject_small_body_second(self):
-        """2nd candle body too small."""
-        params = self._valid_touch_long()
-        params["o1"] = 1.08030  # body = 0.5 pip (< 2 pip threshold)
-        params["c1"] = 1.08035
-        assert detect_wick_cross_long(**params) is False
-
-    def test_reject_second_candle_crosses_tup(self):
-        """2nd candle low below TUp → invalid (no cross allowed on C2)."""
-        params = self._valid_touch_long()
-        params["l1"] = 1.07990  # below TUp
-        assert detect_wick_cross_long(**params) is False
-
-    def test_reject_red_third_candle(self):
-        """3rd candle must be GREEN."""
-        params = self._valid_touch_long()
-        params["oi"] = 1.08050
-        params["ci"] = 1.08020  # close < open → RED
-        assert detect_wick_cross_long(**params) is False
-
-    def test_reject_flat_third_candle(self):
-        """3rd candle close == open → not green."""
-        params = self._valid_touch_long()
-        params["oi"] = 1.08030
-        params["ci"] = 1.08030
-        assert detect_wick_cross_long(**params) is False
-
-    def test_close_proximity_first_candle(self):
-        """1st candle: low far but close within close_pips of TUp → valid."""
-        params = self._valid_touch_long()
-        params["l2"] = 1.08008  # 0.8 pips above TUp (> wick threshold)
-        params["c2"] = 1.08005  # 0.5 pips above TUp (within close_pips=1.0)
-        params["o2"] = 1.08050  # body = 4.5 pips
-        assert detect_wick_cross_long(**params) is True
+    def test_c1_body_too_small(self):
+        """c1 body below minimum → no match."""
+        tup = 1.08000
+        # c1: RED, body = 0.05 pips (below 0.1 pip min)
+        c1 = (1.08001, 1.08005, 1.07998, 1.08000)  # body = 0.1 pip
+        # With c1_body_pips=0.2, the 0.1 pip body is too small
+        c2 = (1.08005, 1.08040, 1.08000, 1.08035)
+        assert not detect_engulf_2(c1, c2, tup, 1, c1_body_pips=0.2)
 
 
 # ---------------------------------------------------------------------------
-# detect_wick_cross_short tests
+# detect_engulf_3 tests (Pattern B)
 # ---------------------------------------------------------------------------
 
-class TestDetectWickCrossShort:
-    """SHORT pattern: GREEN candle touches TDown, RED candle bounces, RED confirm."""
+class TestDetectEngulf3:
+    """Test the 3-candle engulfing pattern near SuperTrend."""
 
-    # TDown = 1.09000
-    # C1 (i-2): GREEN, o=1.08940, h=1.08997, l=1.08930, c=1.08980 (body=4 pips, high 0.3 pips below TDown)
-    # C2 (i-1): RED, o=1.08990, h=1.08996, l=1.08950, c=1.08960 (body=3 pips, high 0.4 pips below TDown)
-    # C3 (i): RED, o=1.08980, c=1.08950
+    def test_long_match(self):
+        """LONG: c1 RED near TUp, c3 GREEN, net move > c1 body."""
+        tup = 1.08000
+        # c1 (i-2): RED, close near TUp, body = 2 pips
+        c1 = (1.08020, 1.08025, 1.07995, 1.08000)
+        # c2 (i-1): any candle, open = 1.08010
+        c2 = (1.08010, 1.08015, 1.08005, 1.08008)
+        # c3 (i): GREEN, body = 4 pips, net_move = c3.close - c2.open = 1.08045 - 1.08010 = 3.5 pips > 2 pips
+        c3 = (1.08005, 1.08050, 1.08000, 1.08045)
+        assert detect_engulf_3(c1, c2, c3, tup, 1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def _valid_touch_short(self):
-        tdown = 1.09000
-        return dict(
-            o2=1.08940, h2=1.08997, l2=1.08930, c2=1.08980, tdown2=tdown,
-            o1=1.08990, h1=1.08996, l1=1.08950, c1=1.08960, tdown1=tdown,
-            oi=1.08980, ci=1.08950,
-            c1_body_pips=3.0, c1_wick_pips=0.5, c1_close_pips=1.0,
-            c2_body_pips=2.0, c2_wick_pips=0.5, c2_close_pips=1.0,
-        )
+    def test_short_match(self):
+        """SHORT: c1 GREEN near TDown, c3 RED, net move > c1 body."""
+        tdown = 1.08100
+        # c1 (i-2): GREEN, close near TDown, body = 2 pips
+        c1 = (1.08080, 1.08105, 1.08075, 1.08100)
+        # c2 (i-1): any candle, open = 1.08090
+        c2 = (1.08090, 1.08095, 1.08085, 1.08088)
+        # c3 (i): RED, body = 4 pips, net_move = c2.open - c3.close = 1.08090 - 1.08055 = 3.5 pips > 2 pips
+        c3 = (1.08095, 1.08100, 1.08050, 1.08055)
+        assert detect_engulf_3(c1, c2, c3, tdown, -1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def test_valid_touch_pattern(self):
-        """Valid SHORT touch pattern should return True."""
-        assert detect_wick_cross_short(**self._valid_touch_short()) is True
+    def test_net_move_insufficient(self):
+        """Net move doesn't exceed c1 body → no match."""
+        tup = 1.08000
+        c1 = (1.08030, 1.08035, 1.07995, 1.08000)  # body = 3 pips
+        c2 = (1.08010, 1.08015, 1.08005, 1.08008)   # open = 1.08010
+        # net_move = 1.08035 - 1.08010 = 2.5 pips < 3 pips (c1 body)
+        c3 = (1.08005, 1.08040, 1.08000, 1.08035)
+        assert not detect_engulf_3(c1, c2, c3, tup, 1, c1_close_pips=0.8, c1_body_pips=0.1, c2_body_pips=0.6)
 
-    def test_valid_cross_pattern(self):
-        """1st candle wick crosses above TDown but closes below → valid."""
-        params = self._valid_touch_short()
-        params["h2"] = 1.09010  # above TDown
-        params["c2"] = 1.08980  # below TDown
-        assert detect_wick_cross_short(**params) is True
+    def test_c3_wrong_color(self):
+        """c3 RED for LONG pattern → no match."""
+        tup = 1.08000
+        c1 = (1.08020, 1.08025, 1.07995, 1.08000)
+        c2 = (1.08010, 1.08015, 1.08005, 1.08008)
+        c3 = (1.08040, 1.08045, 1.08000, 1.08005)  # RED (close < open)
+        assert not detect_engulf_3(c1, c2, c3, tup, 1)
 
-    def test_reject_red_first_candle(self):
-        """1st candle must be GREEN for short pattern."""
-        params = self._valid_touch_short()
-        params["o2"] = 1.08990
-        params["c2"] = 1.08940  # open > close → RED
-        assert detect_wick_cross_short(**params) is False
 
-    def test_reject_small_body_first(self):
-        """1st candle body too small."""
-        params = self._valid_touch_short()
-        params["o2"] = 1.08970  # body = 1 pip
-        params["c2"] = 1.08980
-        assert detect_wick_cross_short(**params) is False
+# ---------------------------------------------------------------------------
+# detect_wick_cross tests (Pattern C)
+# ---------------------------------------------------------------------------
 
-    def test_reject_green_second_candle(self):
-        """2nd candle must be RED for short pattern."""
-        params = self._valid_touch_short()
-        params["o1"] = 1.08960
-        params["c1"] = 1.08990  # close > open → GREEN
-        assert detect_wick_cross_short(**params) is False
+class TestDetectWickCross:
+    """Test the wick cross SuperTrend pattern."""
 
-    def test_reject_second_candle_crosses_tdown(self):
-        """2nd candle high above TDown → invalid."""
-        params = self._valid_touch_short()
-        params["h1"] = 1.09010  # above TDown
-        assert detect_wick_cross_short(**params) is False
+    def test_long_match(self):
+        """LONG: GREEN candle, wick below TUp, close above TUp."""
+        tup = 1.08000
+        # GREEN candle, low pierces below TUp by 1 pip, close above TUp
+        candle = (1.08005, 1.08020, 1.07990, 1.08015)
+        assert detect_wick_cross(candle, tup, 1, wx_st_pips=0.4)
 
-    def test_reject_green_third_candle(self):
-        """3rd candle must be RED."""
-        params = self._valid_touch_short()
-        params["oi"] = 1.08950
-        params["ci"] = 1.08980  # close > open → GREEN
-        assert detect_wick_cross_short(**params) is False
+    def test_short_match(self):
+        """SHORT: RED candle, wick above TDown, close below TDown."""
+        tdown = 1.08100
+        # RED candle, high pierces above TDown by 1 pip, close below TDown
+        candle = (1.08095, 1.08110, 1.08080, 1.08085)
+        assert detect_wick_cross(candle, tdown, -1, wx_st_pips=0.4)
 
-    def test_first_candle_too_far_from_tdown(self):
-        """1st candle high too far from TDown."""
-        params = self._valid_touch_short()
-        params["h2"] = 1.08980  # 2 pips below TDown
-        params["c2"] = 1.08980  # also 2 pips below TDown
-        assert detect_wick_cross_short(**params) is False
+    def test_wrong_color_long(self):
+        """RED candle for LONG → no match."""
+        tup = 1.08000
+        candle = (1.08015, 1.08020, 1.07990, 1.08005)  # RED (close < open)
+        assert not detect_wick_cross(candle, tup, 1, wx_st_pips=0.4)
 
-    def test_close_proximity_first_candle(self):
-        """1st candle: high far but close within close_pips of TDown → valid."""
-        params = self._valid_touch_short()
-        params["h2"] = 1.08992  # 0.8 pips below TDown (> wick threshold)
-        params["c2"] = 1.08995  # 0.5 pips below TDown (within close_pips=1.0)
-        params["o2"] = 1.08950  # body = 4.5 pips
-        assert detect_wick_cross_short(**params) is True
+    def test_insufficient_depth(self):
+        """Wick doesn't pierce deep enough → no match."""
+        tup = 1.08000
+        # low = 1.07998, depth = 0.2 pips (< 0.4 threshold)
+        candle = (1.08005, 1.08020, 1.07998, 1.08015)
+        assert not detect_wick_cross(candle, tup, 1, wx_st_pips=0.4)
+
+    def test_close_wrong_side(self):
+        """Close below TUp for LONG → no match."""
+        tup = 1.08000
+        candle = (1.07990, 1.08010, 1.07980, 1.07995)  # GREEN but close < TUp
+        assert not detect_wick_cross(candle, tup, 1, wx_st_pips=0.4)
+
+    def test_wick_doesnt_cross(self):
+        """Wick stays above TUp for LONG → no match."""
+        tup = 1.08000
+        candle = (1.08005, 1.08020, 1.08002, 1.08015)  # low > TUp
+        assert not detect_wick_cross(candle, tup, 1, wx_st_pips=0.4)

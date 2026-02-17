@@ -43,34 +43,23 @@ volume_filter:
   threshold: 1.6             # Min vol ratio to allow signal entry (optimized from 1.0)
 
 # Wick Cross SuperTrend Entry (WCSE)
-# Alternative entry on vol-filtered signals via 3-candle pullback pattern
+# Close-price entry patterns near SuperTrend support/resistance:
+#   A. Engulfing (2-candle): pullback C1 near ST, C2 engulfs C1
+#   B. Engulfing 3-bar (3-candle): C1 near ST, C2+C3 combined engulfs C1
+#   C. Wick Cross ST (1-candle): wick pierces through ST, body stays on trend side
 wcse:
   enabled: false
-  entry_times: 1           # Max TP exits per swing (0=unlimited)
-  c1_body_pips: 1.3        # 1st candle min body size
-  c1_wick_pips: 5.0        # 1st candle wick proximity to ST
-  c1_close_pips: 5.0       # 1st candle close proximity to ST
-  c2_body_pips: 0.5        # 2nd candle min body size
-  c2_wick_pips: 7.0        # 2nd candle wick proximity to ST
-  c2_close_pips: 7.0       # 2nd candle close proximity to ST
-  tp_rr: 1.2               # TP risk:reward ratio
-  sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
-  stop_buffer_pips: 0.5    # Buffer above c2.high for buy stop (below c2.low for sell stop)
-  # Vol check: any candle in c0..c3 window >= main vol_threshold → pass
-  # Override with vf_threshold to use a different threshold (0 = disabled)
-
-# Wick Cross SuperTrend Entry 2 (WCSE2)
-# Engulfing pattern near SuperTrend — runs alongside WCSE1
-wcse2:
-  enabled: false
-  entry_times: 2           # Max TP exits per swing (0=unlimited)
-  c_body_pips: 0.2         # Pre-engulfing candle min body size
-  c_wick_pips: 3.0         # c1 wick proximity to ST
-  c_close_pips: 3.0        # c1 close proximity to ST
-  engulf_body_pips: 1.0    # Engulfing candle min body size
-  tp_rr: 4.0               # TP risk:reward ratio
-  sl_buffer_pips: 0.0      # SL buffer beyond SuperTrend
-  # Vol check: any candle in c0..c3 window >= main vol_threshold → pass
+  entry_times: 1             # Max TP exits per swing (0=unlimited)
+  c1_close_pips: 0.8         # Engulfing C1 close proximity to ST
+  c1_body_pips: 0.1          # Engulfing C1 min body size
+  c2_body_pips: 0.6          # Engulfing C2/C3 min body size
+  tp_rr: 1.2                 # TP risk:reward ratio
+  wcse_sl_buffer_pips: 0.0   # SL buffer beyond SuperTrend for E2/E3
+  wick_cross:
+    wx_st_pips: 0.4          # Min wick depth through SuperTrend
+    wx_sl_buff: 0.0          # WX initial SL = prev candle close ± this
+    wx_sl_trail_after_candles: 3  # Start trailing SL with ST after N bars
+    wx_sl_trail_buff: 0.0    # Buffer from ST when WX trailing is active
 
 # Signal Strategy (ppst_official_bt) - baseline, not recommended
 signal_strategy:

@@ -24,7 +24,9 @@ class Position:
     close_reason: Optional[str] = None
     close_bar: Optional[int] = None
     pnl: float = 0.0
-    entry_source: str = "signal"  # "signal", "wcse", or "wcse2"
+    entry_source: str = "signal"  # "signal" or "wcse"
+    entry_pattern: str = ""       # "E2", "E3", "WX", or "" (signal)
+    wx_entry_bar: int = 0         # bar_index when WX entry placed
 
     def __post_init__(self):
         if self.original_sl is None:
@@ -88,6 +90,13 @@ class Position:
             else:
                 self.sl_price = min(self.sl_price, trailing_sl)
 
+    def trail_sl_raw(self, new_sl: float) -> None:
+        """Trail SL, only tightening, no original_sl guard (for WX after N bars)."""
+        if self.is_long and new_sl > self.sl_price:
+            self.sl_price = new_sl
+        elif self.is_short and new_sl < self.sl_price:
+            self.sl_price = new_sl
+
     def check_break_even(
         self,
         close: float,
@@ -147,4 +156,5 @@ class Position:
             "be_triggered": self.be_triggered,
             "supertrend_trailing": self.supertrend_trailing,
             "entry_source": self.entry_source,
+            "entry_pattern": self.entry_pattern,
         }
