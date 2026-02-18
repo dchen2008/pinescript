@@ -55,6 +55,8 @@ i_risk_percent = input.float(1.0, "Risk Per Trade (%)", group=strat_group, minva
 i_units = input.int(10000, "Fixed Position Size (Units)", group=strat_group, minval=1000, step=1000, display=display.none)
 i_max_position = input.int(500000, "Max Position Size (Units)", group=strat_group, minval=1000, step=50000,
      tooltip="Safety cap. 500K ≈ $10K equity at 50:1 OANDA leverage", display=display.none)
+i_enable_signal = input.bool(true, "Enable Signal Entries", group=strat_group,
+     tooltip="Trend-change entries. Disable to test WCSE-only or Vol-only scenarios", display=display.none)
 i_spread_pips = input.float(1.5, "Spread (Pips)", group=strat_group, minval=0, step=0.1, display=display.none)
 i_sl_buffer = input.float(0.0, "SL Buffer (Pips)", group=strat_group, minval=0, step=0.5,
      tooltip="Added below SuperTrend for LONG SL, above for SHORT SL", display=display.none)
@@ -67,17 +69,21 @@ i_tp_pips = input.float(30.0, "TP Fixed Pips", group=strat_group, minval=5, step
 // ═══════════════════════════════════════════════════════════════════════════════
 wcse_group = "WCSE (Wick Cross ST Entry)"
 i_wcse_enabled = input.bool(true, "Enable WCSE", group=wcse_group, display=display.none)
-i_wcse_only = input.bool(false, "WCSE Only (disable signal entries)", group=wcse_group,
-     tooltip="When true, all signals arm WCSE — only WCSE pattern entries fire", display=display.none)
 i_wcse_entry_times = input.int(1, "Max TP Exits Per Swing", minval=0, group=wcse_group,
      tooltip="0=unlimited. Only TP exits count; SL exits are free retries", display=display.none)
-i_wcse_c1_body = input.float(0.2, "C1 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
-i_wcse_c1_close = input.float(2.5, "C1 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
-i_wcse_c2_body = input.float(0.2, "C2 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
-i_wcse_wick_cross = input.float(1.5, "Wick Cross Min (pips)", group=wcse_group, minval=0, step=0.5,
+i_wcse_c1_body = input.float(0.1, "C1 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
+i_wcse_c1_close = input.float(0.8, "C1 Close Proximity (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
+i_wcse_c2_body = input.float(0.6, "C2 Min Body (pips)", group=wcse_group, minval=0, step=0.1, display=display.none)
+i_wcse_wick_cross = input.float(0.4, "Wick Cross Min (pips)", group=wcse_group, minval=0, step=0.5,
      tooltip="Min wick depth through SuperTrend for Pattern C (wick cross)", display=display.none)
 i_wcse_tp_rr = input.float(1.2, "TP Risk:Reward", group=wcse_group, minval=0.5, step=0.5, display=display.none)
 i_wcse_sl_buffer = input.float(0.0, "SL Buffer (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
+i_wcse_wx_sl_buffer = input.float(0.0, "WX SL Buffer (pips)", group=wcse_group, minval=0, step=0.5,
+     tooltip="Wick Cross initial SL = prev candle close ± this buffer", display=display.none)
+i_wcse_wx_trail_after = input.int(3, "WX Trail After (bars)", group=wcse_group, minval=0, maxval=20,
+     tooltip="Start trailing SL with SuperTrend after N bars. 0 = trail immediately", display=display.none)
+i_wcse_wx_trail_buffer = input.float(0.0, "WX Trail Buffer (pips)", group=wcse_group, minval=0, step=0.5,
+     tooltip="Buffer from SuperTrend when WX trailing is active", display=display.none)
 
 // Display
 disp_group = "Display"
@@ -297,6 +303,8 @@ var int wcse_entry_source = 0   // 0=signal, 1=wcse (tracks current position sou
 var int wcse_armed_count = 0    // stats: total arm events
 var int wcse_entry_count = 0    // stats: total WCSE entries
 var int wcse_skip_count = 0     // stats: pattern matched but entry skipped (sl_dist <= 0)
+var bool wcse_is_wx_entry = false   // current position is from wick cross pattern
+var int wcse_wx_entry_bar = 0       // bar_index when WX entry was placed
 
 // ── WCSE Auto-Arm (always armed in current trend direction) ──
 if i_wcse_enabled
@@ -399,11 +407,12 @@ wcse_buy_entry = false
 wcse_sell_entry = false
 wcse_pattern_name = ""
 
-if buy_signal and strategy.position_size <= 0 and not i_wcse_only
+if buy_signal and strategy.position_size <= 0 and i_enable_signal
     // Enter LONG from flat or reverse from SHORT
     // Skip if already LONG (after filtered SELL → position continues with trailing SL)
     entered_this_bar := true
     wcse_entry_source := 0
+    wcse_is_wx_entry := false
     entry_price := close + pips_to_price(i_spread_pips)
     sl_price := Trailingsl - pips_to_price(i_sl_buffer)
     original_sl := sl_price
@@ -426,11 +435,12 @@ if buy_signal and strategy.position_size <= 0 and not i_wcse_only
     position_dir := 1
     strategy.entry("Long", strategy.long, qty=qty)
 
-if sell_signal and strategy.position_size >= 0 and not i_wcse_only
+if sell_signal and strategy.position_size >= 0 and i_enable_signal
     // Enter SHORT from flat or reverse from LONG
     // Skip if already SHORT (after filtered BUY → position continues with trailing SL)
     entered_this_bar := true
     wcse_entry_source := 0
+    wcse_is_wx_entry := false
     entry_price := close - pips_to_price(i_spread_pips)
     sl_price := Trailingsl + pips_to_price(i_sl_buffer)
     original_sl := sl_price
@@ -460,6 +470,7 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
         wcse_matched = false
         wcse_dir = wcse_armed_dir
         wcse_vol_pass = false
+        wcse_is_wx = false
 
         // Priority: A (2-candle engulf) > B (3-candle engulf) > C (wick cross)
         if not wcse_matched and wcse_dir == 1 and _engulf_long
@@ -482,16 +493,18 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
             wcse_matched := true
             wcse_vol_pass := wcse_vol_ok_1(vol_threshold)
             wcse_pattern_name := "WX↑"
+            wcse_is_wx := true
         if not wcse_matched and wcse_dir == -1 and _wick_cross_short
             wcse_matched := true
             wcse_vol_pass := wcse_vol_ok_1(vol_threshold)
             wcse_pattern_name := "WX↓"
+            wcse_is_wx := true
 
         if wcse_matched and wcse_vol_pass
             float wcse_sl_buf = pips_to_price(i_wcse_sl_buffer)
             if wcse_dir == 1
                 entry_price := close + pips_to_price(i_spread_pips)
-                sl_price := TUp - wcse_sl_buf
+                sl_price := wcse_is_wx ? close[1] - pips_to_price(i_wcse_wx_sl_buffer) : TUp - wcse_sl_buf
                 original_sl := sl_price
                 sl_dist = entry_price - sl_price
                 if sl_dist > 0
@@ -512,12 +525,15 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
                     wcse_entry_source := 1
                     wcse_entry_count := wcse_entry_count + 1
                     wcse_buy_entry := true
+                    if wcse_is_wx
+                        wcse_is_wx_entry := true
+                        wcse_wx_entry_bar := bar_index
                     strategy.entry("Long", strategy.long, qty=qty)
                 else
                     wcse_skip_count := wcse_skip_count + 1
             else
                 entry_price := close - pips_to_price(i_spread_pips)
-                sl_price := TDown + wcse_sl_buf
+                sl_price := wcse_is_wx ? close[1] + pips_to_price(i_wcse_wx_sl_buffer) : TDown + wcse_sl_buf
                 original_sl := sl_price
                 sl_dist = sl_price - entry_price
                 if sl_dist > 0
@@ -538,6 +554,9 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
                     wcse_entry_source := 1
                     wcse_entry_count := wcse_entry_count + 1
                     wcse_sell_entry := true
+                    if wcse_is_wx
+                        wcse_is_wx_entry := true
+                        wcse_wx_entry_bar := bar_index
                     strategy.entry("Short", strategy.short, qty=qty)
                 else
                     wcse_skip_count := wcse_skip_count + 1
@@ -550,16 +569,40 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
 // ═══════════════════════════════════════════════════════════════════════════════
 // Trail SL with SuperTrend: use TUp for longs, TDown for shorts
 // CRITICAL: use TUp/TDown directly, NOT Trailingsl (which flips with trend)
-// WCSE entries use FIXED SL (no trailing) — trailing would exit before TP at RR 4.0
-if strategy.position_size != 0 and not na(original_sl) and wcse_entry_source != 1
-    if position_dir == 1 and not na(TUp)
-        trailing_sl = TUp - pips_to_price(i_sl_buffer)
-        if trailing_sl > original_sl and trailing_sl > sl_price
-            sl_price := trailing_sl
-    else if position_dir == -1 and not na(TDown)
-        trailing_sl = TDown + pips_to_price(i_sl_buffer)
-        if trailing_sl < original_sl and trailing_sl < sl_price
-            sl_price := trailing_sl
+// Each entry type uses its own buffer and trailing rules
+if strategy.position_size != 0 and not na(original_sl)
+    // --- Signal entries: trail with i_sl_buffer ---
+    if wcse_entry_source != 1
+        if position_dir == 1 and not na(TUp)
+            trailing_sl = TUp - pips_to_price(i_sl_buffer)
+            if trailing_sl > original_sl and trailing_sl > sl_price
+                sl_price := trailing_sl
+        else if position_dir == -1 and not na(TDown)
+            trailing_sl = TDown + pips_to_price(i_sl_buffer)
+            if trailing_sl < original_sl and trailing_sl < sl_price
+                sl_price := trailing_sl
+
+    // --- E2/E3 WCSE entries: trail with i_wcse_sl_buffer ---
+    else if not wcse_is_wx_entry
+        if position_dir == 1 and not na(TUp)
+            trailing_sl = TUp - pips_to_price(i_wcse_sl_buffer)
+            if trailing_sl > original_sl and trailing_sl > sl_price
+                sl_price := trailing_sl
+        else if position_dir == -1 and not na(TDown)
+            trailing_sl = TDown + pips_to_price(i_wcse_sl_buffer)
+            if trailing_sl < original_sl and trailing_sl < sl_price
+                sl_price := trailing_sl
+
+    // --- WX entries: trail with i_wcse_wx_trail_buffer after N bars ---
+    else if bar_index - wcse_wx_entry_bar >= i_wcse_wx_trail_after
+        if position_dir == 1 and not na(TUp)
+            trailing_sl = TUp - pips_to_price(i_wcse_wx_trail_buffer)
+            if trailing_sl > sl_price
+                sl_price := trailing_sl
+        else if position_dir == -1 and not na(TDown)
+            trailing_sl = TDown + pips_to_price(i_wcse_wx_trail_buffer)
+            if trailing_sl < sl_price
+                sl_price := trailing_sl
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SL/TP EXIT ORDERS
@@ -584,6 +627,7 @@ if strategy.position_size == 0 and position_dir != 0 and not entered_this_bar
     original_sl := na
     tp_price := na
     position_dir := 0
+    wcse_is_wx_entry := false
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // P&L LABELS ON TRADE CLOSE
@@ -861,7 +905,7 @@ if show_stats and barstate.islast
         row := row + 1
 
         table.cell(stats_table, 0, row, "WCSE Mode", text_color=color.black, text_size=size.small)
-        wcse_mode = i_wcse_only ? "WCSE Only" : "Mixed"
+        wcse_mode = not i_enable_signal ? "WCSE Only" : "Signal" + (i_wcse_enabled ? " + WCSE" : "")
         table.cell(stats_table, 1, row, wcse_mode, text_color=color.aqua, text_size=size.small)
         row := row + 1
 
