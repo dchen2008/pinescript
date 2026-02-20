@@ -79,7 +79,7 @@ i_wcse_wick_cross = input.float(0.4, "Wick Cross Min (pips)", group=wcse_group, 
 i_wcse_tp_rr = input.float(1.2, "TP Risk:Reward", group=wcse_group, minval=0.5, step=0.5, display=display.none)
 i_wcse_sl_buffer = input.float(0.0, "SL Buffer (pips)", group=wcse_group, minval=0, step=0.5, display=display.none)
 i_wcse_wx_sl_buffer = input.float(0.0, "WX SL Buffer (pips)", group=wcse_group, minval=0, step=0.5,
-     tooltip="Wick Cross initial SL = prev candle close ± this buffer", display=display.none)
+     tooltip="Wick Cross SL = SuperTrend ± this buffer", display=display.none)
 i_wcse_wx_trail_after = input.int(3, "WX Trail After (bars)", group=wcse_group, minval=0, maxval=20,
      tooltip="Start trailing SL with SuperTrend after N bars. 0 = trail immediately", display=display.none)
 i_wcse_wx_trail_buffer = input.float(0.0, "WX Trail Buffer (pips)", group=wcse_group, minval=0, step=0.5,
@@ -504,7 +504,7 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
             float wcse_sl_buf = pips_to_price(i_wcse_sl_buffer)
             if wcse_dir == 1
                 entry_price := close + pips_to_price(i_spread_pips)
-                sl_price := wcse_is_wx ? close[1] - pips_to_price(i_wcse_wx_sl_buffer) : TUp - wcse_sl_buf
+                sl_price := wcse_is_wx ? TUp - pips_to_price(i_wcse_wx_sl_buffer) : TUp - wcse_sl_buf
                 original_sl := sl_price
                 sl_dist = entry_price - sl_price
                 if sl_dist > 0
@@ -533,7 +533,7 @@ if i_wcse_enabled and wcse_armed_dir != 0 and strategy.position_size == 0 and no
                     wcse_skip_count := wcse_skip_count + 1
             else
                 entry_price := close - pips_to_price(i_spread_pips)
-                sl_price := wcse_is_wx ? close[1] + pips_to_price(i_wcse_wx_sl_buffer) : TDown + wcse_sl_buf
+                sl_price := wcse_is_wx ? TDown + pips_to_price(i_wcse_wx_sl_buffer) : TDown + wcse_sl_buf
                 original_sl := sl_price
                 sl_dist = sl_price - entry_price
                 if sl_dist > 0
@@ -639,9 +639,12 @@ if strategy.closedtrades > nz(strategy.closedtrades[1])
     trade_size = strategy.closedtrades.size(trade_idx)
     entry_p = strategy.closedtrades.entry_price(trade_idx)
     exit_p = strategy.closedtrades.exit_price(trade_idx)
-    pnl = (exit_p - entry_p) * trade_size
     was_short = trade_size < 0
-    pnl_text = pnl >= 0 ? "$" + str.tostring(pnl, "#.##") : "-$" + str.tostring(math.abs(pnl), "#.##")
+    // Adjust TV entry by spread (TV fills at close, real entry includes spread cost)
+    entry_p := was_short ? entry_p - pips_to_price(i_spread_pips) : entry_p + pips_to_price(i_spread_pips)
+    pnl = (exit_p - entry_p) * trade_size
+    pnl_prefix = closing_entry_source == 1 ? "W:" : "S:"
+    pnl_text = pnl >= 0 ? pnl_prefix + "$" + str.tostring(pnl, "#.##") : pnl_prefix + "-$" + str.tostring(math.abs(pnl), "#.##")
     pnl_color = pnl >= 0 ? color.green : color.red
     // WCSE TP tracking: use snapshot from BEFORE entries modified wcse_entry_source
     if closing_entry_source == 1 and pnl > 0
@@ -650,7 +653,7 @@ if strategy.closedtrades > nz(strategy.closedtrades[1])
     // (WCSE re-entry on the same bar as previous trade close is common after TP hits)
     if not entered_this_bar
         wcse_entry_source := 0
-    // SHORT exit → P&L above (BUY signal is below), LONG exit → P&L below (SELL signal is above)
+    // SHORT exit → P&L above, LONG exit → P&L below
     label.new(bar_index, na, pnl_text,
          style=label.style_none,
          textcolor=pnl_color, size=size.small,
